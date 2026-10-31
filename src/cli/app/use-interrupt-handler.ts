@@ -1,3 +1,4 @@
+import { getTuiTurnControl } from "./tui-turn-owner";
 // src/cli/app/useInterruptHandler.ts
 
 import {
@@ -200,6 +201,7 @@ export function useInterruptHandler(ctx: InterruptHandlerContext) {
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: refs are stable objects; .current is read dynamically when interrupt fires.
   const handleInterrupt = useCallback(async () => {
+    getTuiTurnControl(abortControllerRef)?.executionSettlement.cancel();
     // If we're executing client-side tools, abort them AND the main stream
     const hasTrackedTools =
       executingToolCallIdsRef.current.length > 0 ||

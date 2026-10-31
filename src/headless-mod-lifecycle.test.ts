@@ -36,6 +36,7 @@ describe("headless mod adapter", () => {
 
   test("uses headless mod capabilities", () => {
     expect(HEADLESS_MOD_CAPABILITIES).toEqual({
+      turn: { interrupt: false },
       tools: true,
       commands: false,
       events: {
@@ -49,6 +50,7 @@ describe("headless mod adapter", () => {
       providers: true,
       ui: {
         panels: false,
+        dialogs: false,
       },
     });
   });

@@ -1,3 +1,5 @@
+import { NativeQuestionPrompts } from "@/cli/mods/ModQuestionDialog";
+import type { PendingModQuestion } from "@/cli/mods/question-queue";
 // src/cli/app/AppView.tsx
 
 import { APIError } from "@letta-ai/letta-client/core/error";
@@ -29,7 +31,6 @@ import { ExperimentSelector } from "@/cli/components/ExperimentSelector";
 import { FeedbackDialog } from "@/cli/components/FeedbackDialog";
 import { HelpDialog } from "@/cli/components/HelpDialog";
 import { HooksManager } from "@/cli/components/HooksManager";
-import { InlineQuestionApproval } from "@/cli/components/InlineQuestionApproval";
 import { Input } from "@/cli/components/InputRich";
 import { InstallGithubAppFlow } from "@/cli/components/InstallGithubAppFlow";
 import { LettaLoginOverlay } from "@/cli/components/LettaLoginOverlay";
@@ -247,6 +248,7 @@ type AppViewProps = {
   hasBackfilledRef: RefObject<boolean>;
   hasTemporaryModelOverride: boolean;
   includeSystemPromptUpgradeTip: boolean;
+  modQuestion: PendingModQuestion | null;
   inputEnabled: boolean;
   inputVisible: boolean;
   interruptRequested: boolean;
@@ -418,6 +420,7 @@ export function AppView(props: AppViewProps) {
     hasBackfilledRef,
     hasTemporaryModelOverride,
     includeSystemPromptUpgradeTip,
+    modQuestion,
     inputEnabled,
     inputVisible,
     interruptRequested,
@@ -698,18 +701,12 @@ export function AppView(props: AppViewProps) {
                 );
               })()}
 
-            {/* Reflection arena choice prompt - merges the selected memory worktree */}
-            {reflectionArenaChoicePending && !currentApproval && (
-              <Box marginTop={1} flexDirection="column">
-                <InlineQuestionApproval
-                  key={reflectionArenaChoicePending.runId}
-                  questions={reflectionArenaChoicePending.questions}
-                  onSubmit={handleReflectionArenaChoiceSubmit}
-                  onCancel={handleReflectionArenaChoiceCancel}
-                  isFocused={true}
-                />
-              </Box>
-            )}
+            <NativeQuestionPrompts
+              reflection={reflectionArenaChoicePending}
+              modQuestion={modQuestion}
+              onSubmit={handleReflectionArenaChoiceSubmit}
+              onCancel={handleReflectionArenaChoiceCancel}
+            />
 
             {/* /btw ephemeral pane - shows forked conversation response */}
             {btwState.status !== "idle" && (
@@ -737,7 +734,9 @@ export function AppView(props: AppViewProps) {
                 onBashInterrupt={handleBashInterrupt}
                 inputEnabled={inputEnabled}
                 collapseInputWhenDisabled={
-                  pendingApprovals.length > 0 || anySelectorOpen
+                  pendingApprovals.length > 0 ||
+                  anySelectorOpen ||
+                  !!modQuestion
                 }
                 permissionMode={uiPermissionMode}
                 onPermissionModeChange={handlePermissionModeChange}

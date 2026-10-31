@@ -1,6 +1,7 @@
+import { createApprovalExecutionOutput } from "./approval-execution-output";
+import { getTuiTurnControl } from "./tui-turn-owner";
 // src/cli/app/useApprovalFlow.ts
 
-import { randomUUID } from "node:crypto";
 import {
   type Dispatch,
   type MutableRefObject,
@@ -18,7 +19,6 @@ import type { SessionStats } from "@/agent/stats";
 import {
   type Buffers,
   markIncompleteToolsAsCancelled,
-  onChunk,
   setToolCallsRunning,
 } from "@/cli/helpers/accumulator";
 import type { AdvancedDiffSuccess } from "@/cli/helpers/diff";
@@ -355,10 +355,12 @@ export function useApprovalFlow(ctx: ApprovalFlowContext) {
   // biome-ignore lint/correctness/useExhaustiveDependencies: approval refs are stable objects; .current is read dynamically during the approval send.
   const sendAllResults = useCallback(
     async (
-      additionalDecision?:
-        | { type: "approve"; approval: ApprovalRequest }
-        | { type: "deny"; approval: ApprovalRequest; reason: string },
+      additionalDecision?: ApprovalDecision | ApprovalDecision[],
+      owner = { turn: getTuiTurnControl(abortControllerRef) },
     ) => {
+      const logicalTurn = owner.turn;
+      if (logicalTurn !== getTuiTurnControl(abortControllerRef)) return;
+      setIsExecutingTool(true);
       const approvalAbortController = new AbortController();
       // Snapshot current state before clearing dialog. Companion results
       // (auto-handled + auto-denied) are built here — before the try — so
@@ -377,6 +379,7 @@ export function useApprovalFlow(ctx: ApprovalFlowContext) {
         // Don't send results if user has already cancelled
         if (
           userCancelledRef.current ||
+          logicalTurn?.signal.aborted ||
           abortControllerRef.current?.signal.aborted
         ) {
           setStreaming(false);
@@ -413,7 +416,11 @@ export function useApprovalFlow(ctx: ApprovalFlowContext) {
         // Combine all decisions using snapshots
         const allDecisions = [
           ...approvalResultsSnapshot,
-          ...(additionalDecision ? [additionalDecision] : []),
+          ...(Array.isArray(additionalDecision)
+            ? additionalDecision
+            : additionalDecision
+              ? [additionalDecision]
+              : []),
         ];
 
         const approvedDecisions = allDecisions.filter(
@@ -459,28 +466,19 @@ export function useApprovalFlow(ctx: ApprovalFlowContext) {
             ).preparedToolContext.contextId;
           executedResults = await executeApprovalBatch(
             allDecisions,
-            (chunk) => {
-              onChunk(buffersRef.current, chunk);
-              // Also log errors to the UI error display
-              if (
-                chunk.status === "error" &&
-                chunk.message_type === "tool_return_message"
-              ) {
-                const isToolError = chunk.tool_return?.startsWith(
-                  "Error executing tool:",
-                );
-                if (isToolError) {
-                  appendError(chunk.tool_return, {
-                    errorType: "tool_execution_error",
-                    context: "tool_execution",
-                  });
-                }
-              }
-              // Flush UI so completed tools show up while the batch continues
-              refreshDerived();
-            },
+            createApprovalExecutionOutput(
+              buffersRef.current,
+              appendError,
+              refreshDerived,
+            ),
             {
-              abortSignal: approvalAbortController.signal,
+              executionSettlement: logicalTurn?.executionSettlement,
+              abortSignal: logicalTurn
+                ? AbortSignal.any([
+                    approvalAbortController.signal,
+                    logicalTurn.signal,
+                  ])
+                : approvalAbortController.signal,
               onStreamingOutput: updateStreamingOutput,
               toolContextId: approvalToolContextId,
             },
@@ -528,12 +526,11 @@ export function useApprovalFlow(ctx: ApprovalFlowContext) {
           }
         }
 
-        // Rotate to a new thinking message
         setThinkingMessage(getRandomThinkingVerb());
         refreshDerived();
 
-        const wasAborted = approvalAbortController.signal.aborted;
-        // ESC cancel: wasAborted primary; userCancelledRef covers late cancels.
+        const wasAborted =
+          logicalTurn?.signal.aborted || approvalAbortController.signal.aborted;
         const userCancelled = userCancelledRef.current;
 
         if (wasAborted || userCancelled) {
@@ -757,6 +754,7 @@ export function useApprovalFlow(ctx: ApprovalFlowContext) {
       const currentApproval = pendingApprovals[currentIndex];
       if (!approvalContext || !currentApproval) return;
 
+      const logicalTurn = getTuiTurnControl(abortControllerRef);
       const parsedArgs = safeJsonParseOr<Record<string, unknown>>(
         currentApproval.toolArgs,
         {},
@@ -824,14 +822,8 @@ export function useApprovalFlow(ctx: ApprovalFlowContext) {
         const nowAutoAllowed = recheckResults.filter(
           (r) => r.permission.decision === "allow",
         );
-        const stillNeedAsking = recheckResults.filter(
-          (r) =>
-            r.permission.decision === "ask" ||
-            r.permission.decision === "alwaysAsk",
-        );
-
-        // Only auto-handle if ALL remaining are now allowed (avoids partial-batch sync issues)
-        if (stillNeedAsking.length === 0 && nowAutoAllowed.length > 0) {
+        // Share batch execution only when every remaining approval is allowed.
+        if (nowAutoAllowed.length === remainingApprovals.length) {
           const currentApproval = pendingApprovals[currentIndex];
           if (!currentApproval) return;
 
@@ -842,123 +834,22 @@ export function useApprovalFlow(ctx: ApprovalFlowContext) {
             }
           }
 
-          setIsExecutingTool(true);
-
-          // Snapshot BEFORE clearing (ID matching): include ALL prior decisions
-          const approvalResultsSnapshot = [...approvalResults];
-          const autoHandledSnapshot = [...autoHandledResults];
-          const autoDeniedSnapshot = [...autoDeniedApprovals];
-
-          // Build ALL decisions: previous + current + auto-allowed remaining
-          const allDecisions: Array<
-            | { type: "approve"; approval: ApprovalRequest }
-            | { type: "deny"; approval: ApprovalRequest; reason: string }
-          > = [
-            ...approvalResultsSnapshot, // Include decisions from previous rounds
-            { type: "approve", approval: currentApproval },
-            ...nowAutoAllowed.map((r) => ({
-              type: "approve" as const,
-              approval: r.approval,
-            })),
-          ];
-
-          // Clear dialog state immediately
-          setPendingApprovals([]);
-          setApprovalContexts([]);
-          setApprovalResults([]);
-          setAutoHandledResults([]);
-          setAutoDeniedApprovals([]);
-
-          setStreaming(true);
-          openTrajectorySegment();
-          buffersRef.current.interrupted = false;
-
-          // Set phase to "running" for all approved tools
-          setToolCallsRunning(
-            buffersRef.current,
-            allDecisions
-              .filter((d) => d.type === "approve")
-              .map((d) => d.approval.toolCallId),
+          await sendAllResults(
+            [
+              { type: "approve", approval: currentApproval },
+              ...nowAutoAllowed.map(({ approval }) => ({
+                type: "approve" as const,
+                approval,
+              })),
+            ],
+            { turn: logicalTurn },
           );
-          refreshDerived();
-
-          try {
-            // Execute ALL decisions together
-            const { executeApprovalBatch } = await import(
-              "@/agent/approval-execution"
-            );
-            const approvalToolContextId =
-              approvalToolContextIdRef.current ??
-              (
-                await prepareScopedToolExecutionContext(
-                  tempModelOverrideRef.current ?? undefined,
-                )
-              ).preparedToolContext.contextId;
-            const executedResults = await executeApprovalBatch(
-              allDecisions,
-              (chunk) => {
-                onChunk(buffersRef.current, chunk);
-                refreshDerived();
-              },
-              {
-                onStreamingOutput: updateStreamingOutput,
-                toolContextId: approvalToolContextId,
-              },
-            );
-
-            // Combine with auto-handled and auto-denied results (from initial check)
-            const allResults = [
-              ...autoHandledSnapshot.map((ar) => ({
-                type: "tool" as const,
-                tool_call_id: ar.toolCallId,
-                tool_return: ar.result.toolReturn,
-                status: ar.result.status,
-                stdout: ar.result.stdout,
-                stderr: ar.result.stderr,
-              })),
-              ...autoDeniedSnapshot.map((ad) => ({
-                type: "approval" as const,
-                tool_call_id: ad.approval.toolCallId,
-                approve: false,
-                reason: ad.reason,
-              })),
-              ...executedResults,
-            ];
-
-            setThinkingMessage(getRandomThinkingVerb());
-            refreshDerived();
-
-            // Continue conversation with all results
-            await processConversation([
-              {
-                type: "approval",
-                approvals: allResults as ApprovalResult[],
-                otid: randomUUID(),
-              },
-            ]);
-          } catch (error) {
-            markIncompleteToolsAsCancelled(
-              buffersRef.current,
-              true,
-              "stream_error",
-            );
-            const errorDetails = formatErrorDetails(error, agentId);
-            appendError(errorDetails, {
-              ...extractErrorMeta(error),
-              context: "approval_send",
-            });
-            setStreaming(false);
-            closeTrajectorySegment();
-            syncTrajectoryElapsedBase();
-            refreshDerived();
-          } finally {
-            setIsExecutingTool(false);
-          }
           return; // Don't call handleApproveCurrent - we handled everything
         }
       }
 
       // Fallback: proceed with normal flow (will prompt for remaining approvals)
+      if (logicalTurn !== getTuiTurnControl(abortControllerRef)) return;
       await handleApproveCurrent(diffs);
     },
     [
@@ -967,27 +858,10 @@ export function useApprovalFlow(ctx: ApprovalFlowContext) {
       approvalResults,
       approvalContexts,
       pendingApprovals,
-      autoHandledResults,
-      autoDeniedApprovals,
       handleApproveCurrent,
-      processConversation,
-      refreshDerived,
-      appendError,
+      sendAllResults,
       isExecutingTool,
-      setStreaming,
       setUiPermissionMode,
-      openTrajectorySegment,
-      closeTrajectorySegment,
-      syncTrajectoryElapsedBase,
-      prepareScopedToolExecutionContext,
-      updateStreamingOutput,
-      setApprovalContexts,
-      setApprovalResults,
-      setAutoDeniedApprovals,
-      setAutoHandledResults,
-      setIsExecutingTool,
-      setPendingApprovals,
-      setThinkingMessage,
       approvalToolContextIdRef,
     ],
   );

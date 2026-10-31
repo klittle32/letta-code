@@ -51,6 +51,7 @@ afterEach(() => {
 describe("listener mod adapter", () => {
   test("uses provider and tool capabilities", () => {
     expect(LISTENER_MOD_CAPABILITIES).toEqual({
+      turn: { interrupt: false },
       tools: true,
       commands: true,
       events: {
@@ -64,6 +65,7 @@ describe("listener mod adapter", () => {
       providers: true,
       ui: {
         panels: false,
+        dialogs: false,
       },
     });
     expect(createListenerModEvents([]).hasHandlers?.("tool_end")).toBe(false);

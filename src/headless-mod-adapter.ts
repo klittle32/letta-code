@@ -19,6 +19,7 @@ import { telemetry } from "@/telemetry";
 import { getVersion } from "@/version";
 
 export const HEADLESS_MOD_CAPABILITIES: ModCapabilities = {
+  turn: { interrupt: false },
   tools: true,
   commands: false,
   events: {
@@ -32,6 +33,7 @@ export const HEADLESS_MOD_CAPABILITIES: ModCapabilities = {
   providers: true,
   ui: {
     panels: false,
+    dialogs: false,
   },
 };
 

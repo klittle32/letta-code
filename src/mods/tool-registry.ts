@@ -10,6 +10,7 @@ import type {
 import { attachDeprecatedGetContextTrap } from "./deprecated-api";
 import { areModsDisabled } from "./disable";
 import { runWithModInvocationContext } from "./invocation-context";
+import { bindModTurnContext } from "./turn-handle";
 
 const MOD_TOOLS_KEY = Symbol.for("@letta/modTools");
 
@@ -141,5 +142,8 @@ export async function runModTool(
   if (tool.activationSignal.aborted) {
     throw new Error(`Mod tool '${tool.name}' is no longer available`);
   }
-  return runWithModInvocationContext(context, () => tool.run(context));
+  const ownedContext = bindModTurnContext(context, tool.activationSignal);
+  return runWithModInvocationContext(ownedContext, () =>
+    tool.run(ownedContext),
+  );
 }

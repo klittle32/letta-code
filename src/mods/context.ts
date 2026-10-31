@@ -64,6 +64,12 @@ export function buildModInvocationContext(
   };
 
   return {
+    turn:
+      base?.turn?.conversationId ===
+        (options.conversationId ?? base?.sessionId) &&
+      base?.turn?.agentId === (options.agent?.id ?? base?.agent.id)
+        ? base?.turn
+        : undefined,
     app: base?.app ?? { version: getVersion() },
     workspace,
     cwd,

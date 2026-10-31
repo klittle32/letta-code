@@ -1,4 +1,3 @@
-// src/cli/app/AppCoordinator.tsx
 import { join } from "node:path";
 import type {
   AgentState,
@@ -50,10 +49,6 @@ import { getClient } from "@/backend/api/client";
 import { getBillingTier } from "@/backend/api/metadata";
 import { subscribePiProviderRegistry } from "@/backend/dev/pi-provider-mod-registry";
 import { useConversationTitleSync } from "@/cli/app/conversation-title-sync";
-import {
-  cancelActiveConnectOperation,
-  isActiveConnectOperationCancellable,
-} from "@/cli/commands/connect-command-state";
 import { refreshCustomCommands } from "@/cli/commands/custom";
 import {
   type CommandFinishedEvent,
@@ -143,6 +138,7 @@ import {
   type LocalModAdapter,
   useLocalModAdapter,
 } from "@/cli/mods/use-local-mod-adapter";
+import { useModQuestions } from "@/cli/mods/use-mod-questions";
 import {
   getIntendedCronOccurrence,
   getTask,
@@ -223,6 +219,7 @@ import {
   TOOL_CALL_COMMIT_DEFER_MS,
 } from "./constants";
 import { uid } from "./ids";
+import { getQuestionFocus, onEscapeCommandCancel } from "./input-focus";
 import {
   countWrappedLines,
   countWrappedLinesFromList,
@@ -238,6 +235,7 @@ import {
   reasoningEffortLlmConfigPatch,
 } from "./model-config";
 import { prepareSessionExit } from "./session";
+import { attachTuiTurnContext, snapshotTuiModContext } from "./tui-turn-owner";
 import type {
   ActiveOverlay,
   AppProps,
@@ -1570,7 +1568,6 @@ export function App({
     restoreQueueOnCancelRef.current = restoreQueueOnCancel;
   }, [restoreQueueOnCancel]);
 
-  // Cache last sent input - cleared on successful completion, remains if interrupted
   const lastSentInputRef = useRef<Array<MessageCreate | ApprovalCreate> | null>(
     null,
   );
@@ -1592,7 +1589,7 @@ export function App({
           conversationId: conversationIdRef.current,
           overrideModel: desiredModel,
           workingDirectory,
-          modContext: modAdapterRef.current?.context,
+          modContext: snapshotTuiModContext(modAdapterRef.current?.context),
           modEvents: modAdapterRef.current?.events,
         });
       }
@@ -1601,7 +1598,7 @@ export function App({
         return prepareToolExecutionContextForResolvedTarget({
           modelIdentifier: desiredModel,
           conversationId: conversationIdRef.current,
-          modContext: modAdapterRef.current?.context,
+          modContext: snapshotTuiModContext(modAdapterRef.current?.context),
           modEvents: modAdapterRef.current?.events,
           toolsetPreference: currentToolsetPreference,
           workingDirectory,
@@ -1611,7 +1608,7 @@ export function App({
       return prepareToolExecutionContextForResolvedTarget({
         modelIdentifier: null,
         conversationId: conversationIdRef.current,
-        modContext: modAdapterRef.current?.context,
+        modContext: snapshotTuiModContext(modAdapterRef.current?.context),
         modEvents: modAdapterRef.current?.events,
         toolsetPreference: currentToolsetPreference,
         workingDirectory,
@@ -2285,11 +2282,17 @@ export function App({
       agentId: a.agentId ?? null,
     })),
   });
+  attachTuiTurnContext(modContext, abortControllerRef);
   const agentModsDirectory =
     modContext.memfs.enabled && modContext.memfs.memoryDir
       ? join(modContext.memfs.memoryDir, "mods")
       : null;
+  const modQuestions = useModQuestions(
+    modContext.agent.id,
+    modContext.sessionId,
+  );
   const modAdapter = useLocalModAdapter(modContext, {
+    onAsk: modQuestions.ask,
     agentModsDirectory,
     disabled: modsDisabled,
     onNotification: appendModNotification,
@@ -4263,6 +4266,7 @@ export function App({
       !commandRunning &&
       !isExecutingTool &&
       !reflectionArenaChoicePending &&
+      !modQuestions.pending &&
       !anySelectorOpen && // Don't dequeue while a selector/overlay is open
       !waitingForQueueCancelRef.current && // Don't dequeue while waiting for cancel
       !userCancelledRef.current && // Don't dequeue if user just cancelled
@@ -4337,6 +4341,7 @@ export function App({
     commandRunning,
     isExecutingTool,
     reflectionArenaChoicePending,
+    modQuestions.pending,
     anySelectorOpen,
     dequeueEpoch,
     queuedOverlayAction,
@@ -4921,27 +4926,17 @@ export function App({
     trajectoryTokenDisplayRef.current,
   );
   const inputVisible = !showExitStats;
-  const reflectionArenaChoiceVisible = Boolean(
-    reflectionArenaChoicePending &&
-      !showExitStats &&
-      !streaming &&
-      !commandRunning &&
-      !isExecutingTool &&
-      pendingApprovals.length === 0 &&
-      !anySelectorOpen,
-  );
-  const inputEnabled =
-    !showExitStats &&
-    pendingApprovals.length === 0 &&
-    !reflectionArenaChoiceVisible &&
-    !anySelectorOpen;
-  const onEscapeCommandCancel = useCallback(() => {
-    if (isActiveConnectOperationCancellable()) {
-      cancelActiveConnectOperation();
-      return true;
-    }
-    return false;
-  }, []);
+  const { reflectionArenaChoiceVisible, modQuestion, inputEnabled } =
+    getQuestionFocus({
+      pending: modQuestions.pending,
+      reflectionPending: !!reflectionArenaChoicePending,
+      showExitStats,
+      streaming,
+      commandRunning,
+      isExecutingTool,
+      pendingApprovals,
+      anySelectorOpen,
+    });
   const showInspirationalPromptHints =
     loadingState === "ready" &&
     !hasConversationContent(lines) &&
@@ -4968,11 +4963,14 @@ export function App({
         shouldAnimate={shouldAnimate}
         hasActiveProgress={terminalTitleTaskRunning}
         requiresAction={
-          pendingApprovals.length > 0 || reflectionArenaChoiceVisible
+          pendingApprovals.length > 0 ||
+          reflectionArenaChoiceVisible ||
+          !!modQuestion
         }
         previewTitle={terminalTitlePreviewOverride}
       />
       <AppView
+        modQuestion={modQuestion}
         activeOverlay={activeOverlay}
         agentId={agentId}
         agentName={agentName}

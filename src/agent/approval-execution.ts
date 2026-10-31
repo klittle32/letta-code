@@ -8,6 +8,10 @@ import type {
   ToolReturn,
 } from "@letta-ai/letta-client/resources/agents/messages";
 import type { ToolReturnMessage } from "@letta-ai/letta-client/resources/tools";
+import type {
+  ApprovalExecutionSettlement,
+  ApprovalExecutionTicket,
+} from "@/agent/approval-execution-settlement";
 import type { ApprovalRequest } from "@/cli/helpers/stream";
 import { INTERRUPTED_BY_USER } from "@/constants";
 import {
@@ -229,6 +233,7 @@ async function executeSingleDecision(
   onChunk?: (chunk: ToolReturnMessage) => void,
   options?: {
     abortSignal?: AbortSignal;
+    executionSettlement?: ApprovalExecutionSettlement;
     onStreamingOutput?: (
       toolCallId: string,
       chunk: string,
@@ -244,12 +249,13 @@ async function executeSingleDecision(
       toolCallId: string,
       result: ApprovalResult,
     ) => void | Promise<void>;
+    executionTicket?: ApprovalExecutionTicket;
     /** Injectable executor for production-path concurrency tests. */
     executeTool?: typeof executeTool;
   },
 ): Promise<ApprovalResult> {
-  // If aborted, record an interrupted result
-  if (options?.abortSignal?.aborted) {
+  // Both cancellation boundaries use the caller's guarded terminal callback.
+  const interruptedResult = (): ApprovalResult => {
     if (onChunk) {
       onChunk({
         message_type: "tool_return_message",
@@ -266,6 +272,12 @@ async function executeSingleDecision(
       tool_return: INTERRUPTED_BY_USER,
       status: "error",
     };
+  };
+  if (
+    options?.abortSignal?.aborted ||
+    options?.executionSettlement?.cancelled
+  ) {
+    return interruptedResult();
   }
 
   if (decision.type === "approve") {
@@ -284,6 +296,15 @@ async function executeSingleDecision(
 
     // Cross the caller's durable effect fence immediately before tool code can run.
     await options?.beforeToolExecution?.(decision.approval.toolCallId);
+
+    // The durability fence may yield. Recheck immediately before invoking code.
+    if (
+      options?.abortSignal?.aborted ||
+      options?.executionSettlement?.cancelled ||
+      (options?.executionTicket && !options.executionTicket.start())
+    ) {
+      return interruptedResult();
+    }
 
     // Execute the approved tool
     try {
@@ -418,6 +439,7 @@ export async function executeApprovalBatch(
   onChunk?: (chunk: ToolReturnMessage) => void,
   options?: {
     abortSignal?: AbortSignal;
+    executionSettlement?: ApprovalExecutionSettlement;
     onStreamingOutput?: (
       toolCallId: string,
       chunk: string,
@@ -435,12 +457,25 @@ export async function executeApprovalBatch(
     executeTool?: typeof executeTool;
   },
 ): Promise<ApprovalResult[]> {
-  // Tools are what fill the disk, so watch it while they run.
-  return watchDiskSpaceDuring(
-    options?.workingDirectory ?? getCurrentWorkingDirectory(),
-    (text) => deliverDiskSpaceReminder(text, options?.parentScope),
-    () => executeApprovalBatchUnwatched(decisions, onChunk, options),
-  );
+  const tracking = {
+    tickets: decisions.map((decision) =>
+      options?.executionSettlement?.register(decision.approval.toolCallId),
+    ),
+    dispatched: false,
+  };
+  try {
+    // Tools are what fill the disk, so watch it while they run.
+    return await watchDiskSpaceDuring(
+      options?.workingDirectory ?? getCurrentWorkingDirectory(),
+      (text) => deliverDiskSpaceReminder(text, options?.parentScope),
+      () =>
+        executeApprovalBatchUnwatched(decisions, onChunk, options, tracking),
+    );
+  } finally {
+    // Once dispatched, only the actual task promises may settle tickets.
+    if (!tracking.dispatched)
+      for (const ticket of tracking.tickets) ticket?.finish();
+  }
 }
 
 export async function settleApprovalExecutionTasks(
@@ -552,6 +587,10 @@ async function executeApprovalBatchUnwatched(
   decisions: ApprovalDecision[],
   onChunk: ((chunk: ToolReturnMessage) => void) | undefined,
   options: Parameters<typeof executeApprovalBatch>[2],
+  tracking: {
+    tickets: (ApprovalExecutionTicket | undefined)[];
+    dispatched: boolean;
+  },
 ): Promise<ApprovalResult[]> {
   const toolContextId =
     options?.toolContextId ??
@@ -640,21 +679,30 @@ async function executeApprovalBatchUnwatched(
   const execute = async (i: number) => {
     const decision = decisions[i];
     if (decision) {
-      let crossedEffectBoundary = false;
-      const result = await executeSingleDecision(decision, guardedOnChunk, {
-        ...guardedOptions,
-        toolContextId,
-        beforeToolExecution: async (toolCallId) => {
-          await guardedOptions?.beforeToolExecution?.(toolCallId);
-          crossedEffectBoundary = true;
-        },
-      });
-      results[i] = result;
-      if (decision.type === "approve" && crossedEffectBoundary) {
-        await options?.afterToolExecution?.(
-          decision.approval.toolCallId,
-          result,
-        );
+      const ticket = tracking.tickets[i];
+      try {
+        let crossedEffectBoundary = false;
+        const result = await executeSingleDecision(decision, guardedOnChunk, {
+          ...guardedOptions,
+          executionTicket: ticket,
+          toolContextId,
+          beforeToolExecution: async (toolCallId) => {
+            await guardedOptions?.beforeToolExecution?.(toolCallId);
+            crossedEffectBoundary = true;
+          },
+        });
+        results[i] = result;
+        if (decision.type === "approve" && crossedEffectBoundary) {
+          await options?.afterToolExecution?.(
+            decision.approval.toolCallId,
+            result,
+          );
+        }
+      } catch (error) {
+        ticket?.finish(error);
+        throw error;
+      } finally {
+        ticket?.finish();
       }
     }
   };
@@ -666,19 +714,26 @@ async function executeApprovalBatchUnwatched(
   //
   // Do not fail fast here. A sibling may already have crossed its effect boundary;
   // callers must retain their claim/lease until every started group has settled.
+  tracking.dispatched = true;
+  const tasks = [
+    // Parallel-safe tools + denials: all run in parallel
+    ...parallelIndices.map(execute),
+    ...denyIndices.map(execute),
+    // Write tools: sequential within each resource group, parallel across groups
+    ...Array.from(writeToolsByResource.values()).map(async (indices) => {
+      for (const i of indices) {
+        await execute(i);
+      }
+    }),
+  ];
+  // A failed serialized group may leave unstarted decisions. Keep observing
+  // every group even after the responsive abort race has returned.
+  void Promise.allSettled(tasks).then(() => {
+    for (const ticket of tracking.tickets) ticket?.finish();
+  });
   try {
     await settleApprovalExecutionTasks(
-      [
-        // Parallel-safe tools + denials: all run in parallel
-        ...parallelIndices.map(execute),
-        ...denyIndices.map(execute),
-        // Write tools: sequential within each resource group, parallel across groups
-        ...Array.from(writeToolsByResource.values()).map(async (indices) => {
-          for (const i of indices) {
-            await execute(i);
-          }
-        }),
-      ],
+      tasks,
       () =>
         results.filter((result): result is ApprovalResult => result !== null),
       { abortSignal: options?.abortSignal },
@@ -707,6 +762,7 @@ export async function executeAutoAllowedTools(
   onChunk: (chunk: ToolReturnMessage) => void,
   options?: {
     abortSignal?: AbortSignal;
+    executionSettlement?: ApprovalExecutionSettlement;
     onStreamingOutput?: (
       toolCallId: string,
       chunk: string,
@@ -715,6 +771,7 @@ export async function executeAutoAllowedTools(
     toolContextId?: string;
     workingDirectory?: string;
     onFileWrite?: (filePath: string, content: string) => void;
+    executeTool?: typeof executeTool;
   },
 ): Promise<AutoAllowedResult[]> {
   const decisions: ApprovalDecision[] = autoAllowed.map((ac) => ({

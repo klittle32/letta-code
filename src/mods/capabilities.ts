@@ -1,6 +1,7 @@
 import type { ModCapabilities } from "@/mods/types";
 
 export const MOD_CAPABILITY_IDS = [
+  "turn.interrupt",
   "tools",
   "commands",
   "providers",
@@ -11,6 +12,7 @@ export const MOD_CAPABILITY_IDS = [
   "events.compact",
   "events.llm",
   "ui.panels",
+  "ui.dialogs",
 ] as const;
 
 export type ModCapabilityId = (typeof MOD_CAPABILITY_IDS)[number];
@@ -22,6 +24,7 @@ export function isModCapabilityId(value: string): value is ModCapabilityId {
 }
 
 export const DEFAULT_MOD_CAPABILITIES: ModCapabilities = {
+  turn: { interrupt: false },
   tools: true,
   commands: true,
   events: {
@@ -35,10 +38,12 @@ export const DEFAULT_MOD_CAPABILITIES: ModCapabilities = {
   providers: true,
   ui: {
     panels: true,
+    dialogs: false,
   },
 };
 
 export const DISABLED_MOD_CAPABILITIES: ModCapabilities = {
+  turn: { interrupt: false },
   tools: false,
   commands: false,
   events: {
@@ -52,6 +57,7 @@ export const DISABLED_MOD_CAPABILITIES: ModCapabilities = {
   providers: false,
   ui: {
     panels: false,
+    dialogs: false,
   },
 };
 
@@ -83,6 +89,7 @@ export function cloneModCapabilities(
   capabilities: ModCapabilities,
 ): ModCapabilities {
   return {
+    turn: { interrupt: capabilities.turn?.interrupt === true },
     tools: capabilities.tools,
     commands: capabilities.commands,
     events: {
@@ -96,6 +103,7 @@ export function cloneModCapabilities(
     providers: capabilities.providers,
     ui: {
       panels: capabilities.ui.panels,
+      dialogs: capabilities.ui.dialogs === true,
     },
   };
 }

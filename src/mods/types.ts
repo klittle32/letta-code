@@ -7,6 +7,11 @@ import type {
 import type { ChalkInstance } from "chalk";
 import type { ModelReasoningEffort } from "@/agent/model";
 import type { SubagentLifecycleContext } from "@/agent/subagent-state";
+import type {
+  InterruptTurnRef,
+  TurnInterruptRequestResult,
+} from "@/agent/turn-interrupt";
+import type { AskUserQuestion } from "@/ask-user-question";
 
 export interface ModWorkspaceContext {
   cwd: string;
@@ -67,7 +72,21 @@ export interface ModBackgroundAgentContext {
   agentId: string | null;
 }
 
+export interface ModAskOptions {
+  questions: AskUserQuestion[];
+  signal?: AbortSignal;
+}
+
+export type ModAskResult =
+  | { status: "answered"; answers: Record<string, string> }
+  | {
+      status: "dismissed";
+      reason: "unavailable" | "cancelled" | "scope-changed";
+    };
+
 export interface ModUiCapabilities {
+  /** Hosts normalize an omitted dialog capability to false. */
+  dialogs?: boolean;
   panels: boolean;
 }
 
@@ -80,6 +99,8 @@ export interface ModEventCapabilities {
 }
 
 export interface ModCapabilities {
+  /** Exact-turn request receipts; omitted means unsupported. */
+  turn?: { interrupt: boolean };
   tools: boolean;
   commands: boolean;
   events: ModEventCapabilities;
@@ -344,7 +365,9 @@ export interface ModEventResultMap {
   llm_end: undefined;
 }
 
-export interface ModInvocationContext extends ModContext {}
+export interface ModInvocationContext extends ModContext {
+  signal?: AbortSignal;
+}
 
 export interface ModEventContext extends ModInvocationContext {
   conversation: ModConversationHandle;
@@ -431,7 +454,14 @@ export interface ModDiagnostic {
   timestamp: number;
 }
 
+export interface ModTurnHandle extends InterruptTurnRef {
+  /** Request synchronously. Await receipts only outside turn-owned hooks. */
+  requestInterrupt(reason?: string): TurnInterruptRequestResult;
+}
+
 export interface ModContext {
+  /** Exact observed logical host turn; absent on unsupported hosts or while idle. */
+  turn?: ModTurnHandle;
   app: {
     version: string;
   };

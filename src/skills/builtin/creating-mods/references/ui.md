@@ -159,3 +159,65 @@ export default function activate(letta) {
   };
 }
 ```
+
+## Native questions (local TUI)
+
+`letta.ui.ask({ questions, signal? })` asks the user directly and returns only to
+its calling mod. It does not create a tool call, send a message, or start a model
+turn. Call and await it inside a command or event handler, where the host captures
+the invocation's agent/conversation and the mod's generation. Activation and
+unscoped calls return `{ status: "dismissed", reason: "unavailable" }`.
+
+```ts
+letta.commands.register({
+  id: "choose-action",
+  description: "Choose a local action",
+  async run() {
+    const result = await letta.ui.ask({
+      questions: [{
+        header: "Action",
+        question: "Which action should this mod use?",
+        options: [
+          { label: "Inspect", description: "Read the current state" },
+          { label: "Summarize", description: "Produce a local summary" },
+        ],
+      }],
+    });
+    if (result.status === "dismissed") return { type: "handled" };
+    return { type: "output", output: JSON.stringify(result.answers) };
+  },
+});
+```
+
+Questions use the public `AskUserQuestion` shape (`src/ask-user-question.ts`):
+1–4 questions with distinct question text, each with a header and 2–4 labeled,
+described options. `multiSelect: true` enables multiple selections and explicit
+Submit. The native “Type something” option accepts free text. Answers are keyed
+by question text; multiple selections use the native comma-separated string.
+Invalid question data throws. Each call gets a unique host identity; mods do not
+supply dialog IDs.
+
+`letta.capabilities.ui.dialogs` is true only for the wired local TUI. Headless,
+listener/Desktop, provider-only, and disabled hosts report false. Unsupported
+calls resolve `{ status: "dismissed", reason: "unavailable" }`; there is no
+fabricated answer. Check the result even when the capability is available.
+
+Questions are FIFO. Approvals, security prompts, selectors, and the reflection
+choice take precedence; questions wait without keyboard focus. The main input
+stays mounted and is disabled while a question owns focus. Escape dismisses
+(the native free-text editor first clears nonempty text); Ctrl-C also dismisses.
+Dismissal/abort/reload/disposal return reason `cancelled`; switching the active
+agent or conversation returns `scope-changed`. Pending requests remove themselves
+on every settlement, including cancellation while waiting in the queue.
+
+The existing **30-second command deadline includes time spent answering**. On
+expiry the command fails with a timeout and its pending questions are dismissed.
+The handler's JavaScript can still continue, but further asks from a timed-out
+or failed invocation are cancelled. Successful returns preserve the existing
+async scope: longer owned workflows may start an async function from `run`,
+return `{ type: "handled" }` immediately, and call/await `ask` later in that
+function. Handle background errors in the mod and stop your workflow on a
+dismissed result; the host does not terminate arbitrary JavaScript. The mod's
+owner lifetime still cancels pending asks on reload/disposal, and the queue
+rejects requests for an inactive agent/conversation. Event asks likewise retain
+their owner lifetime. An optional `AbortSignal` cancels a request sooner.

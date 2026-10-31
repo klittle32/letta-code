@@ -36,6 +36,7 @@ async function renderWithQuestions(
   questions: QuestionsProp,
   submit = false,
   onSubmit: (answers: Record<string, string>) => void = () => {},
+  inputs: string[] = ["\r"],
 ): Promise<string> {
   const stdout = new CaptureStream() as CaptureStream & NodeJS.WriteStream;
   const stdin = createInputStream();
@@ -60,8 +61,10 @@ async function renderWithQuestions(
 
     await new Promise((resolve) => setTimeout(resolve, 20));
     if (submit) {
-      stdin.push("\r");
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      for (const input of inputs) {
+        stdin.push(input);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
     }
     instance.unmount();
     instance.cleanup();
@@ -187,4 +190,100 @@ test("InlineQuestionApproval renders and submits a single choice when multiSelec
   expect(output).not.toContain("Run AskUserQuestion?");
   expect(output).not.toContain("ERROR");
   expect(answers).toEqual({ "Choose?": "A" });
+});
+
+for (const [name, chunk, expected] of [
+  ["full input chunk", "Custom local choice", "Custom local choice"],
+  [
+    "join link",
+    "https://example.com/join?invite=123",
+    "https://example.com/join?invite=123",
+  ],
+  ["Unicode chunk", "Zoë 👩🏽‍💻 é", "Zoë 👩🏽‍💻 é"],
+  [
+    "bracketed paste",
+    "\u001b[200~invite@example.com\nhttps://example.com/join\u001b[201~",
+    "invite@example.com https://example.com/join",
+  ],
+] as const) {
+  test(`custom answer accepts ${name} through native Ink stdin`, async () => {
+    let answers: Record<string, string> | undefined;
+    await renderWithQuestions(
+      [
+        {
+          header: "Choice",
+          question: "Choose?",
+          options: [{ label: "A", description: "" }],
+        },
+      ],
+      true,
+      (value) => {
+        answers = value;
+      },
+      ["\u001b[B", chunk, "\r"],
+    );
+    expect(answers).toEqual({ "Choose?": expected });
+  });
+}
+
+for (const multiSelect of [false, true]) {
+  test(`chunk insertion preserves editing and selection (multiSelect=${multiSelect})`, async () => {
+    let answers: Record<string, string> | undefined;
+    await renderWithQuestions(
+      [
+        {
+          header: "Choice",
+          question: "Choose?",
+          multiSelect,
+          options: [{ label: "A", description: "" }],
+        },
+      ],
+      true,
+      (value) => {
+        answers = value;
+      },
+      [
+        // Numbers still select/toggle regular options outside custom input.
+        ...(multiSelect ? ["1"] : []),
+        "\u001b[B",
+        "discard me",
+        "\u001b", // first Escape clears custom text rather than cancelling
+        "ab",
+        "\u001b[D",
+        "12👩🏽‍💻é",
+        "\u0001", // Ctrl+A must not insert text
+        "\u001bx", // Meta+X must not insert text
+        "\u001b[C",
+        "\u007f", // backspace removes b, leaving the Unicode chunk intact
+        "\u001b[200~@example.com\u001b[201~",
+        "\r",
+        ...(multiSelect ? ["\u001b[B", "\r"] : []),
+      ],
+    );
+    expect(answers).toEqual({
+      "Choose?": `${multiSelect ? "A, " : ""}a12👩🏽‍💻é@example.com`,
+    });
+  });
+}
+
+test("number shortcut still submits a regular single choice", async () => {
+  let answers: Record<string, string> | undefined;
+  await renderWithQuestions(
+    [
+      {
+        header: "Choice",
+        question: "Choose?",
+        options: [
+          { label: "A", description: "" },
+          { label: "B", description: "" },
+        ],
+      },
+    ],
+    true,
+    (value) => {
+      answers = value;
+    },
+    ["2"],
+  );
+  expect(answers).toEqual({ "Choose?": "B" });
 });

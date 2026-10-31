@@ -22,6 +22,7 @@ import { emitStatusDelta } from "./protocol-outbound";
 import type { ListenerRuntime } from "./types";
 
 export const LISTENER_MOD_CAPABILITIES: ModCapabilities = {
+  turn: { interrupt: false },
   tools: true,
   commands: true,
   events: {
@@ -35,6 +36,7 @@ export const LISTENER_MOD_CAPABILITIES: ModCapabilities = {
   providers: true,
   ui: {
     panels: false,
+    dialogs: false,
   },
 };
 

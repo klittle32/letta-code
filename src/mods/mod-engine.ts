@@ -34,11 +34,17 @@ import {
 import { isTypeScriptModFileExtension } from "@/mods/file-extensions";
 import * as modInvocationContext from "@/mods/invocation-context";
 import { createModChangeBatcher } from "@/mods/mod-change-batcher";
+import { normalizeModCommand, validateModCommandId } from "@/mods/mod-commands";
 import {
   appendModDiagnostic,
   recordModDiagnostic,
   recordStaleHandleUse,
 } from "@/mods/mod-diagnostics";
+import {
+  getModPanelKey,
+  upsertModPanel,
+  validateModPanelId,
+} from "@/mods/mod-panels";
 import type {
   LocalModSource,
   ResolveLocalModSourcesOptions,
@@ -56,6 +62,7 @@ import {
   unregisterModPermission,
   unregisterModPermissionsForOwner,
 } from "@/mods/permission-registry";
+import { createModAsk, type ModQuestionHandler } from "@/mods/question-api";
 import { ensureRuntimeDependenciesForModCache } from "@/mods/runtime-dependencies";
 import {
   getModToolDefinition,
@@ -64,6 +71,7 @@ import {
   unregisterModTool,
   unregisterModToolsForOwner,
 } from "@/mods/tool-registry";
+import { bindModTurnContext, bindModTurnHandle } from "@/mods/turn-handle";
 import {
   applyTurnStartCancel,
   createTurnStartCancelRecord,
@@ -76,6 +84,8 @@ import {
   preserveApprovalFirstOrdering,
 } from "@/mods/turn-start-input";
 import type {
+  ModAskOptions,
+  ModAskResult,
   ModCapabilities,
   ModCommand,
   ModCommandRegistration,
@@ -94,7 +104,6 @@ import type {
   ModPanel,
   ModPanelHandle,
   ModPanelOptions,
-  ModPanelRender,
   ModPermission,
   ModPermissionRegistration,
   ModSourceScope,
@@ -178,6 +187,7 @@ export interface LettaModApi {
     report: (diagnostic: ModDiagnosticReportOptions) => void;
   };
   ui: {
+    ask: (options: ModAskOptions) => Promise<ModAskResult>;
     closePanel: (id: string) => void;
     notify: (message: string) => void;
     openPanel: (panel: ModPanelOptions) => ModPanelHandle;
@@ -233,6 +243,7 @@ export interface LoadLocalModsOptions extends ResolveLocalModSourcesOptions {
   generation?: number;
   onChange?: () => void;
   onDiagnostic?: (diagnostic: ModDiagnostic) => void;
+  onAsk?: ModQuestionHandler;
   onNotification?: modInvocationContext.ModNotificationHandler;
   onRegistryCreated?: (registry: LocalModRegistry) => void;
   registerCapabilitiesGlobally?: boolean;
@@ -714,42 +725,6 @@ function cloneToolStartArgs(
   }
 }
 
-function validateModCommandId(id: string): void {
-  if (id.startsWith("/")) {
-    throw new Error("Mod command id must not start with '/'");
-  }
-  if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) {
-    throw new Error(
-      "Mod command id must be a lowercase slug using letters, numbers, and hyphens",
-    );
-  }
-}
-
-function normalizeModCommand(
-  command: ModCommandRegistration,
-  owner: ModOwner,
-): ModCommand {
-  validateModCommandId(command.id);
-  if (!command.description.trim()) {
-    throw new Error(`Mod command '${command.id}' must include a description`);
-  }
-  if (typeof command.run !== "function") {
-    throw new Error(`Mod command '${command.id}' must include run()`);
-  }
-
-  return {
-    id: command.id,
-    description: command.description,
-    ...(command.args ? { args: command.args } : {}),
-    owner,
-    order: command.order ?? 250,
-    path: owner.path,
-    runWhenBusy: command.runWhenBusy === true,
-    showInTranscript: command.showInTranscript !== false,
-    run: command.run,
-  };
-}
-
 function validateModPermissionId(id: string): void {
   if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) {
     throw new Error(
@@ -851,37 +826,6 @@ function normalizeModTool(tool: ModToolRegistration, owner: ModOwner): ModTool {
   };
 }
 
-function validateModPanelId(id: string): void {
-  if (!id.trim()) {
-    throw new Error("Mod panel id must not be empty");
-  }
-}
-
-function getModPanelKey(modPath: string, id: string): string {
-  return JSON.stringify([modPath, id]);
-}
-
-function upsertModPanel(
-  registry: LocalModRegistry,
-  owner: ModOwner,
-  id: string,
-  patch: { render?: ModPanelRender; order?: number },
-): void {
-  validateModPanelId(id);
-  const panelKey = getModPanelKey(owner.id, id);
-  const existing = registry.ui.panels[panelKey];
-  const render = patch.render ?? existing?.render;
-  if (!render) return;
-  registry.ui.panels[panelKey] = {
-    render,
-    id,
-    owner,
-    order: patch.order ?? existing?.order ?? 100,
-    path: owner.path,
-    updatedAt: Date.now(),
-  };
-}
-
 function createLettaModApi(
   registry: LocalModRegistry,
   owner: ModOwner,
@@ -893,6 +837,7 @@ function createLettaModApi(
   builtinCommandIds: Set<string>,
   reservedToolNames: Set<string>,
   signal: AbortSignal,
+  onAsk: ModQuestionHandler | undefined,
 ): LettaModApi {
   const isLive = () => isOwnerLive(registry, owner);
   const guardLive = (capability: ModDiagnostic["capability"]): boolean => {
@@ -1148,6 +1093,13 @@ function createLettaModApi(
 
         registry.commands[normalized.id] = {
           ...normalized,
+          run: (context) =>
+            normalized.run(
+              bindModTurnContext(
+                context,
+                capabilities.turn?.interrupt ? signal : undefined,
+              ),
+            ),
           recordDiagnostic: recordCapabilityDiagnostic,
         };
         onChange();
@@ -1265,6 +1217,11 @@ function createLettaModApi(
     },
     diagnostics: { report: reportDiagnostic },
     ui: {
+      ask: createModAsk(
+        owner,
+        signal,
+        capabilities.ui.dialogs ? onAsk : undefined,
+      ),
       closePanel,
       notify(message) {
         if (!onNotification || !message.trim()) return;
@@ -1388,6 +1345,7 @@ export async function loadLocalMods(
   const onChange = options.onChange ?? (() => {});
   const sources = resolveLocalModSources(options);
   const capabilities = resolveModCapabilities(options.capabilities);
+  capabilities.ui.dialogs = capabilities.ui.dialogs === true && !!options.onAsk;
   const generation = options.generation ?? 1;
   const builtinCommandIds = new Set([...(options.builtinCommandIds ?? [])]);
   const reservedToolNames = new Set([...(options.reservedToolNames ?? [])]);
@@ -1476,6 +1434,7 @@ export async function loadLocalMods(
           builtinCommandIds,
           reservedToolNames,
           abortController.signal,
+          options.onAsk,
         );
         const activate = factory as LettaModFactory;
         const dispose = await changes.run(() => activate(api));
@@ -1564,6 +1523,11 @@ export async function emitLocalModEvent<TName extends ModEventName>(
       const eventContext: ModEventContext = attachDeprecatedGetContextTrap(
         {
           ...context,
+          turn: registry.capabilities.turn?.interrupt
+            ? bindModTurnHandle(context.turn, signal)
+            : undefined,
+          agent: { ...context.agent, id: event.agentId ?? context.agent.id },
+          sessionId: event.conversationId ?? context.sessionId,
           conversation: createModConversationHandle({
             agentId:
               typeof event.agentId === "string"
@@ -1716,6 +1680,8 @@ export function createModEngine(options: CreateModEngineOptions): ModEngine {
   let generation = 0;
   let disposed = false;
   const capabilities = resolveModCapabilities(modOptions.capabilities);
+  capabilities.ui.dialogs =
+    capabilities.ui.dialogs === true && !!modOptions.onAsk;
   const registerCapabilitiesGlobally =
     modOptions.registerCapabilitiesGlobally !== false;
   let activeRegistry = createEmptyModRegistry(

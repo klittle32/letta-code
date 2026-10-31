@@ -8,6 +8,10 @@ export type ModNotificationHandler = (
 
 const modInvocationContext = new AsyncLocalStorage<ModInvocationContext>();
 
+export function getModInvocationContext(): ModInvocationContext | undefined {
+  return modInvocationContext.getStore();
+}
+
 export function notifyMod(
   handler: ModNotificationHandler,
   message: string,

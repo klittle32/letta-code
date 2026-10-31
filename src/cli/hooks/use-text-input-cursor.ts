@@ -59,12 +59,12 @@ export function useTextInputCursor(initialText = "") {
       return true;
     }
 
-    // Typing: insert at cursor position (single character)
-    if (input && !key.ctrl && !key.meta && input.length === 1) {
+    // Terminals can deliver several typed characters in one input event.
+    if (input && !key.ctrl && !key.meta) {
       setText(
         (prev) => prev.slice(0, cursorPos) + input + prev.slice(cursorPos),
       );
-      setCursorPos((prev) => prev + 1);
+      setCursorPos((prev) => prev + input.length);
       return true;
     }
 

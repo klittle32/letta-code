@@ -1,3 +1,5 @@
+import { observeTuiRunStream } from "./tui-run-stream";
+import * as tuiTurns from "./tui-turn-owner";
 // src/cli/app/useConversationLoop.ts
 
 import { randomUUID } from "node:crypto";
@@ -106,7 +108,6 @@ import {
 import { finishTuiTurn } from "@/cli/helpers/tui-turn-lifecycle";
 import type { LocalModAdapter } from "@/cli/mods/use-local-mod-adapter";
 import { runStopHooks } from "@/hooks";
-import { getTurnStartCancel } from "@/mods/turn-start-cancel";
 import type { ApprovalContext } from "@/permissions/analyzer";
 import { formatPermissionDenial } from "@/permissions/format-denial";
 import type { PermissionMode } from "@/permissions/mode";
@@ -119,7 +120,6 @@ import { analyzeToolApproval, type ToolExecutionResult } from "@/tools/manager";
 import type { PreparedScopeToolContext } from "@/tools/toolset";
 import { debugLog, debugWarn, isDebugEnabled } from "@/utils/debug";
 import type { QueuedMessage } from "@/utils/message-queue-bridge";
-
 import {
   CONVERSATION_BUSY_MAX_RETRIES,
   EAGER_CANCEL,
@@ -138,6 +138,7 @@ import {
 import { sendDesktopNotification } from "./notifications";
 import { isRetriableError } from "./retry";
 import { getRestorableUserText } from "./system-reminders";
+import { emitTuiTurnStart } from "./tui-turn-start";
 import { prepareTuiQueuedTurn } from "./turn-input";
 import type {
   AppendError,
@@ -165,28 +166,6 @@ function makeExecutionPhaseHook(
     else if (t === "assistant_message") setExecutionPhase("responding");
     return undefined;
   };
-}
-
-function hasUserMessageInput(
-  input: Array<MessageCreate | ApprovalCreate>,
-): boolean {
-  return input.some(
-    (item) =>
-      typeof item === "object" &&
-      item !== null &&
-      item.type !== "approval" &&
-      "role" in item &&
-      item.role === "user",
-  );
-}
-
-function isTurnInputArray(
-  value: unknown,
-): value is Array<MessageCreate | ApprovalCreate> {
-  return (
-    Array.isArray(value) &&
-    value.every((item) => typeof item === "object" && item !== null)
-  );
 }
 
 type ConversationLoopContext = {
@@ -566,32 +545,22 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
           options.clientPreferences,
         );
       processingConversationRef.current += 1;
-      let turnStartCancelReason: string | null = null;
-
-      if (hasUserMessageInput(currentInput)) {
-        const originalInput = currentInput;
-        try {
-          const turnStartEvent = {
-            agentId: agentIdRef.current ?? null,
-            conversationId: conversationIdRef.current ?? null,
-            input: currentInput,
-          };
-          await modAdapter.events.emit(
-            "turn_start",
-            turnStartEvent,
-            modAdapter.context,
-          );
-          currentInput = isTurnInputArray(turnStartEvent.input)
-            ? turnStartEvent.input
-            : originalInput;
-          turnStartCancelReason =
-            getTurnStartCancel(turnStartEvent)?.reason ?? null;
-        } catch {
-          // Mod turn_start handlers should not block sending the turn.
-          currentInput = originalInput;
-          turnStartCancelReason = null;
-        }
-      }
+      const logicalTurn = tuiTurns.enterTuiLogicalTurn({
+        ref: abortControllerRef,
+        generationRef: conversationGenerationRef,
+        generation: myGeneration,
+        continuation:
+          allowReentry || tuiTurns.isTuiApprovalContinuation(currentInput),
+        agentId: agentIdRef.current,
+        conversationId: conversationIdRef.current,
+      });
+      const turnModContext = { ...modAdapter.context };
+      const turnStart = await emitTuiTurnStart(currentInput, {
+        events: modAdapter.events,
+        context: turnModContext,
+      });
+      currentInput = turnStart.input;
+      const turnStartCancelReason = turnStart.cancelReason;
 
       const hasApprovalInput = currentInput.some(
         (item) => item.type === "approval",
@@ -621,8 +590,12 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
 
       let currentRunId: string | undefined;
       let preserveTranscriptStartForApproval = false;
-      let turnAbortController: AbortController | null = null;
+      const turnAbortController = logicalTurn.abortController;
       try {
+        if (logicalTurn.signal.aborted) {
+          setStreaming(false);
+          return;
+        }
         if (turnStartCancelReason) {
           const statusId = uid("status");
           buffersRef.current.byId.set(statusId, {
@@ -651,7 +624,6 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
         openTrajectorySegment();
         setNetworkPhase("upload");
         setExecutionPhase("requesting");
-        turnAbortController = new AbortController();
         abortControllerRef.current = turnAbortController;
 
         if (
@@ -743,7 +715,7 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
         let streamSequenceCursor: StreamSequenceCursor | null = null;
 
         while (true) {
-          const signal = abortControllerRef.current?.signal;
+          const signal = logicalTurn.signal;
 
           // Check if cancelled before starting new stream
           if (signal?.aborted) {
@@ -756,6 +728,8 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
             }
             return;
           }
+
+          logicalTurn.beginBackend();
 
           // Inject queued skill content as user message parts (LET-7353), so
           // all approval-send paths get SKILL.md alongside tool results.
@@ -1298,7 +1272,7 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
                   );
                 }
                 return drainStreamWithResume(
-                  stream,
+                  observeTuiRunStream(stream, logicalTurn.observeRun),
                   buffersRef.current,
                   refreshDerivedThrottled,
                   signal, // Use captured signal, not ref (which may be nulled by handleInterrupt)
@@ -1328,6 +1302,7 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
 
           // Update currentRunId for error reporting in catch block
           currentRunId = lastRunId ?? undefined;
+
           // Expose to statusline
           if (lastRunId) lastRunIdRef.current = lastRunId;
 
@@ -1478,6 +1453,10 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
               userMessage,
             );
 
+            if (logicalTurn.signal.aborted) {
+              setStreaming(false);
+              return;
+            }
             // If hook blocked (exit 2), inject stderr feedback and continue conversation
             if (stopHookResult.blocked) {
               const stderrOutput = stopHookResult.results
@@ -1534,7 +1513,7 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
               await modAdapter.events.emit(
                 "turn_end",
                 turnEndEvent,
-                modAdapter.context,
+                turnModContext,
               );
               turnEndContinue =
                 typeof turnEndEvent.continue === "string"
@@ -1545,6 +1524,10 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
               turnEndContinue = undefined;
             }
 
+            if (logicalTurn.signal.aborted) {
+              setStreaming(false);
+              return;
+            }
             if (turnEndContinue) {
               const continueOtid = randomUUID();
               setTimeout(() => {
@@ -1927,6 +1910,7 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
                         autoAllowed,
                         (chunk) => onChunk(buffersRef.current, chunk),
                         {
+                          executionSettlement: logicalTurn.executionSettlement,
                           abortSignal: autoAllowedAbortController.signal,
                           onStreamingOutput: updateStreamingOutput,
                           toolContextId: approvalToolContextId,
@@ -2831,6 +2815,7 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
         refreshDerived();
         resetTrajectoryBases();
       } finally {
+        logicalTurn.leave(preserveTranscriptStartForApproval);
         if (!preserveTranscriptStartForApproval) {
           pendingTranscriptStartLineIndexRef.current = null;
         }

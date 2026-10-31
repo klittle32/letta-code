@@ -1,5 +1,7 @@
 export type {
   ModAgentContext,
+  ModAskOptions,
+  ModAskResult,
   ModBackgroundAgentContext,
   ModCapabilities,
   ModCapabilityKind,

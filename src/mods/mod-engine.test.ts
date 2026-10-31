@@ -8,6 +8,7 @@ import {
   clearRegisteredPiProviders,
   getRegisteredPiProvider,
 } from "@/backend/dev/pi-provider-mod-registry";
+import { DISABLED_MOD_CAPABILITIES } from "@/mods/capabilities";
 import { getModErrorDiagnostics } from "@/mods/mod-diagnostics";
 import { createModEngine, type ModEngine } from "@/mods/mod-engine";
 import {
@@ -103,6 +104,7 @@ function createEngine(
 }
 
 const TOOL_ONLY_MOD_CAPABILITIES: ModCapabilities = {
+  ...DISABLED_MOD_CAPABILITIES,
   tools: true,
   commands: false,
   events: {
@@ -114,9 +116,6 @@ const TOOL_ONLY_MOD_CAPABILITIES: ModCapabilities = {
   },
   permissions: false,
   providers: false,
-  ui: {
-    panels: false,
-  },
 };
 
 describe("mod engine", () => {

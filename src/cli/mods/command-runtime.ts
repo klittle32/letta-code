@@ -128,11 +128,19 @@ export function buildModCommandPrompt(result: {
 export async function runModCommandWithTimeout(
   command: ModCommand,
   context: ModCommandContext,
+  timeoutMs = MOD_COMMAND_TIMEOUT_MS,
 ): Promise<ModCommandResult> {
+  const invocation = new AbortController();
   let timeout: ReturnType<typeof setTimeout> | null = null;
   try {
     const invocationContext = attachDeprecatedGetContextTrap(
-      context,
+      {
+        ...context,
+        sessionId: context.conversation.id,
+        signal: context.signal
+          ? AbortSignal.any([context.signal, invocation.signal])
+          : invocation.signal,
+      },
       command.recordDiagnostic,
       "ctx.getContext",
     );
@@ -144,19 +152,15 @@ export async function runModCommandWithTimeout(
           ),
         ),
         new Promise<never>((_, reject) => {
-          timeout = setTimeout(
-            () =>
-              reject(
-                new Error(
-                  `Mod command timed out after ${MOD_COMMAND_TIMEOUT_MS}ms`,
-                ),
-              ),
-            MOD_COMMAND_TIMEOUT_MS,
-          );
+          timeout = setTimeout(() => {
+            reject(new Error(`Mod command timed out after ${timeoutMs}ms`));
+            invocation.abort("mod command timed out");
+          }, timeoutMs);
         }),
       ]),
     );
   } catch (error) {
+    invocation.abort("mod command failed");
     command.recordDiagnostic?.({
       capability: { id: command.id, kind: "command" },
       error: error instanceof Error ? error : new Error(String(error)),

@@ -1,6 +1,7 @@
 import type { ModCapabilities } from "@/mods/types";
 
 export const TUI_MOD_CAPABILITIES: ModCapabilities = {
+  turn: { interrupt: true },
   tools: true,
   commands: true,
   events: {
@@ -14,5 +15,6 @@ export const TUI_MOD_CAPABILITIES: ModCapabilities = {
   providers: true,
   ui: {
     panels: true,
+    dialogs: true,
   },
 };
