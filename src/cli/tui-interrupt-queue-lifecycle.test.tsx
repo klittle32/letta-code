@@ -789,7 +789,7 @@ test("mod interrupt during approved tool preserves queued input and real tool re
     expect(continuation).toContain("held-call");
     expect(cancelledRunIds).toHaveLength(1);
     if (receipt?.status !== "requested") throw new Error("missing receipt");
-    expect((await receipt.wait(1000)).status).toBe("incomplete");
+    expect((await receipt.wait(1000)).status).toBe("settled");
   } finally {
     release();
     delete scope.__approvedInterruptTest;

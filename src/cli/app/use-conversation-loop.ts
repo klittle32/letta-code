@@ -1,4 +1,11 @@
+import {
+  admitTuiApprovalPause,
+  buildRetiredApprovalResults,
+  getRecoveredApprovalContexts,
+  recoverTuiApprovalInput,
+} from "./tui-approval-recovery";
 import { observeTuiRunStream } from "./tui-run-stream";
+import { bindTuiTurnEvents, scheduleTuiContinuation } from "./tui-turn-events";
 import * as tuiTurns from "./tui-turn-owner";
 // src/cli/app/useConversationLoop.ts
 
@@ -85,7 +92,6 @@ import {
 import type { ExecutionPhase } from "@/cli/helpers/phase-visuals";
 import { getQueuedNotificationSummaries } from "@/cli/helpers/queued-message-parts";
 import { appendTranscriptDeltaJsonl } from "@/cli/helpers/reflection-transcript";
-import { safeJsonParseOr } from "@/cli/helpers/safe-json-parse";
 import {
   type ApprovalRequest,
   advanceStreamSequenceCursor,
@@ -368,13 +374,12 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
     async (
       currentInput: Array<MessageCreate | ApprovalCreate>,
       allowReentry: boolean,
-      hasApprovalInput: boolean,
     ): Promise<boolean> => {
       const backend = getBackend();
       if (
         !backend.capabilities.localModelCatalog ||
         allowReentry ||
-        hasApprovalInput
+        currentInput.some((item) => item.type === "approval")
       ) {
         return false;
       }
@@ -555,6 +560,7 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
         conversationId: conversationIdRef.current,
       });
       const turnModContext = { ...modAdapter.context };
+      bindTuiTurnEvents(logicalTurn, modAdapter.events, turnModContext);
       const turnStart = await emitTuiTurnStart(currentInput, {
         events: modAdapter.events,
         context: turnModContext,
@@ -590,13 +596,32 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
 
       let currentRunId: string | undefined;
       let preserveTranscriptStartForApproval = false;
+      let awaitingApproval = false;
+      let terminalReason = "error";
       const turnAbortController = logicalTurn.abortController;
       try {
+        currentInput = await recoverTuiApprovalInput(
+          abortControllerRef,
+          logicalTurn.turn,
+          currentInput,
+          () =>
+            !logicalTurn.signal.aborted &&
+            !turnStartCancelReason &&
+            !userCancelledRef.current &&
+            myGeneration === conversationGenerationRef.current &&
+            abortControllerRef.current === turnAbortController,
+        );
+        if (
+          myGeneration !== conversationGenerationRef.current ||
+          abortControllerRef.current !== turnAbortController
+        )
+          return;
         if (logicalTurn.signal.aborted) {
           setStreaming(false);
           return;
         }
         if (turnStartCancelReason) {
+          terminalReason = "cancelled";
           const statusId = uid("status");
           buffersRef.current.byId.set(statusId, {
             kind: "status",
@@ -615,11 +640,6 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
           return;
         }
 
-        // Double-check we haven't become stale between entry and try block
-        if (myGeneration !== conversationGenerationRef.current) {
-          return;
-        }
-
         setStreaming(true);
         openTrajectorySegment();
         setNetworkPhase("upload");
@@ -627,12 +647,9 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
         abortControllerRef.current = turnAbortController;
 
         if (
-          await maybeStreamSyntheticNoModelResponse(
-            currentInput,
-            allowReentry,
-            hasApprovalInput,
-          )
+          await maybeStreamSyntheticNoModelResponse(currentInput, allowReentry)
         ) {
+          terminalReason = "end_turn";
           return;
         }
 
@@ -1100,25 +1117,17 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
                     queueApprovalResults(null);
 
                     // Set up approval UI with fetched approvals
+                    awaitingApproval = true;
+                    admitTuiApprovalPause(
+                      logicalTurn,
+                      abortControllerRef,
+                      serverApprovals,
+                    );
                     setPendingApprovals(serverApprovals);
 
-                    // Analyze approval contexts (same logic as /resume)
-                    try {
-                      const contexts = await Promise.all(
-                        serverApprovals.map(async (approval) => {
-                          const parsedArgs = safeJsonParseOr<
-                            Record<string, unknown>
-                          >(approval.toolArgs, {});
-                          return await analyzeToolApproval(
-                            approval.toolName,
-                            parsedArgs,
-                          );
-                        }),
-                      );
-                      setApprovalContexts(contexts);
-                    } catch {
-                      // If analysis fails, contexts remain empty (will show basic options)
-                    }
+                    setApprovalContexts(
+                      await getRecoveredApprovalContexts(serverApprovals),
+                    );
 
                     // Stop streaming: user needs to approve/deny (finally decrements)
                     setStreaming(false);
@@ -1373,6 +1382,11 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
           }
 
           // Record the final stop reason so the dequeue gate can check it.
+          terminalReason =
+            stopReasonToHandle === "end_turn" ||
+            stopReasonToHandle === "cancelled"
+              ? stopReasonToHandle
+              : "error";
           lastStopReasonRef.current = stopReasonToHandle;
 
           // Case 1: Turn ended normally
@@ -1477,72 +1491,29 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
               refreshDerived();
 
               // Continue conversation with the hook feedback
-              const hookMessageOtid = randomUUID();
-              setTimeout(() => {
-                processConversation(
-                  [
-                    {
-                      type: "message",
-                      role: "user",
-                      content: hookMessage,
-                      otid: hookMessageOtid,
-                    },
-                  ],
-                  { allowReentry: true },
-                );
-              }, 0);
+              scheduleTuiContinuation(
+                hookMessage,
+                logicalTurn.signal,
+                processConversation,
+              );
               return;
             }
 
-            // Emit turn_end mod event. A mod may return { continue: "..." } to
-            // append a follow-up user message and start another turn.
-            const turnEndEvent: {
-              agentId: string | null;
-              conversationId: string | null;
-              stopReason: string;
-              assistantMessage?: string;
-              continue?: string;
-            } = {
-              agentId: agentIdRef.current ?? null,
-              conversationId: conversationIdRef.current ?? null,
-              stopReason: stopReasonToHandle,
+            const turnEndContinue = await logicalTurn.end(
+              stopReasonToHandle,
               assistantMessage,
-            };
-            let turnEndContinue: string | undefined;
-            try {
-              await modAdapter.events.emit(
-                "turn_end",
-                turnEndEvent,
-                turnModContext,
-              );
-              turnEndContinue =
-                typeof turnEndEvent.continue === "string"
-                  ? turnEndEvent.continue
-                  : undefined;
-            } catch {
-              // turn_end handlers are best-effort; never block turn completion.
-              turnEndContinue = undefined;
-            }
+            );
 
             if (logicalTurn.signal.aborted) {
               setStreaming(false);
               return;
             }
             if (turnEndContinue) {
-              const continueOtid = randomUUID();
-              setTimeout(() => {
-                processConversation(
-                  [
-                    {
-                      type: "message",
-                      role: "user",
-                      content: turnEndContinue,
-                      otid: continueOtid,
-                    },
-                  ],
-                  { allowReentry: true },
-                );
-              }, 0);
+              scheduleTuiContinuation(
+                turnEndContinue,
+                logicalTurn.signal,
+                processConversation,
+              );
               return;
             }
 
@@ -2145,6 +2116,20 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
               userCancelledRef.current ||
               abortControllerRef.current?.signal.aborted
             ) {
+              if (
+                logicalTurn.signal.aborted &&
+                myGeneration === conversationGenerationRef.current &&
+                abortControllerRef.current === turnAbortController
+              ) {
+                queueApprovalResults(
+                  buildRetiredApprovalResults(
+                    needsUserInput.map((ac) => ac.approval),
+                    [],
+                    autoAllowedResults,
+                    autoDeniedResults,
+                  ),
+                );
+              }
               setStreaming(false);
               closeTrajectorySegment();
               syncTrajectoryElapsedBase();
@@ -2158,6 +2143,14 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
             }
 
             // Show approval dialog for tools that need user input
+            awaitingApproval = true;
+            admitTuiApprovalPause(
+              logicalTurn,
+              abortControllerRef,
+              needsUserInput.map((ac) => ac.approval),
+              autoAllowedResults,
+              autoDeniedResults,
+            );
             setPendingApprovals(needsUserInput.map((ac) => ac.approval));
             setApprovalContexts(
               needsUserInput
@@ -2223,25 +2216,17 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
                 queueApprovalResults(null);
 
                 // Set up approval UI with fetched approvals
+                awaitingApproval = true;
+                admitTuiApprovalPause(
+                  logicalTurn,
+                  abortControllerRef,
+                  serverApprovals,
+                );
                 setPendingApprovals(serverApprovals);
 
-                // Analyze approval contexts
-                try {
-                  const contexts = await Promise.all(
-                    serverApprovals.map(async (approval) => {
-                      const parsedArgs = safeJsonParseOr<
-                        Record<string, unknown>
-                      >(approval.toolArgs, {});
-                      return await analyzeToolApproval(
-                        approval.toolName,
-                        parsedArgs,
-                      );
-                    }),
-                  );
-                  setApprovalContexts(contexts);
-                } catch {
-                  // If analysis fails, contexts remain empty (will show basic options)
-                }
+                setApprovalContexts(
+                  await getRecoveredApprovalContexts(serverApprovals),
+                );
 
                 // Stop streaming: user needs to approve/deny (finally decrements)
                 setStreaming(false);
@@ -2751,6 +2736,7 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
           return;
         }
       } catch (e) {
+        terminalReason = "error";
         debugWarn(
           "message_stream",
           "Unhandled conversation error: %s",
@@ -2815,7 +2801,7 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
         refreshDerived();
         resetTrajectoryBases();
       } finally {
-        logicalTurn.leave(preserveTranscriptStartForApproval);
+        await logicalTurn.leave(awaitingApproval, terminalReason);
         if (!preserveTranscriptStartForApproval) {
           pendingTranscriptStartLineIndexRef.current = null;
         }

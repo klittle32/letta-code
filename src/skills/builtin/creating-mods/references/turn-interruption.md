@@ -52,11 +52,28 @@ This is a conservative boundary, not a universal stop guarantee:
   termination of upstream provider compute or billing, or rollback of effects.
 - Missing run IDs (including internally resumed streams without direct observation),
   agentless runs, rejected/unconfirmed cancellation, and active
-  child work without exact turn ownership produce `incomplete`. Children known to
-  belong to another parent conversation are excluded; missing parent scope stays
-  conservative.
-- A request while paused at an approval dialog fences execution but reports the
-  unresolved approval owner as incomplete; it does not retire the dialog.
+  foreground child work without exact turn ownership produce `incomplete`.
+  Missing parent scope stays conservative.
+- A request while paused at an approval dialog retires that exact dialog and
+  resolves its logical owner. Untouched approvals become interrupted denials;
+  real companion and precomputed results remain queued for legitimate recovery.
+  Already-running tools retain their execution tickets instead.
+  Pause admission captures recovery independently of React effects, so an accepted
+  interruption still retires its original owner after a scope replacement. Only
+  the current scope may mutate its approval UI. Recovery is retained for the
+  host lifetime under the original agent/conversation and revalidated against
+  that conversation's backend pending tool-call IDs on a later legitimate send.
+  Real companion results replace matching eager-recovery denials. This is
+  in-memory retention, not a durable TUI checkpoint across process restarts.
+- Each logical turn emits one `turn_end`, including `cancelled` and `error`.
+  Terminal events retain the original turn identity and do not await receipt
+  settlement. Continuation effects are ignored for cancelled/error turns.
+- Foreground children are stopped only when parent agent/conversation and an
+  unsettled tool ticket identify this turn. Their per-child stop hooks and
+  cancellation settlement remain tracked, including late registration while the
+  ticket runs. Missing ownership/hooks or failed stops stay incomplete.
+  Background children have independent threads and are untouched, as are children
+  identified with another conversation or another turn's tool ticket.
 - Restored approvals without an observed host turn have no turn handle.
 - No remote-child cancellation protocol or listener/headless interruption API
   is introduced by this slice.

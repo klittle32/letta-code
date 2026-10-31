@@ -265,6 +265,16 @@
       "path": "src/websocket/listener/remote-settings.test.ts",
       "timeoutMs": 15000,
       "reason": "Mutates HOME and the remote-settings singleton to verify startup cwd-map repair."
+    },
+    {
+      "path": "src/cli/tui-approval-scope-retirement.test.tsx",
+      "timeoutMs": 30000,
+      "reason": "Mounts the native approval retirement hook with real scope replacement before passive effects and a scoped backend recovery batch."
+    },
+    {
+      "path": "src/cli/tui-turn-interruption.test.tsx",
+      "timeoutMs": 30000,
+      "reason": "Mounts the real TUI with temporary HOME, settings, mod registry and backend to verify exact-turn retirement and terminal events."
     }
   ]
 }

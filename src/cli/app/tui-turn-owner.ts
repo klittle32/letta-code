@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { MessageCreate } from "@letta-ai/letta-client/resources/agents/agents";
 import type { ApprovalCreate } from "@letta-ai/letta-client/resources/agents/messages";
-import { getSubagents } from "@/agent/subagent-state";
 import { getBackend } from "@/backend";
 import { createHostTurnHandle } from "@/mods/turn-handle";
 import type { ModContext } from "@/mods/types";
@@ -92,15 +91,6 @@ export function enterTuiLogicalTurn(options: {
         { cause: cancelError },
       );
     },
-    hasChildren: () =>
-      getSubagents().some(
-        (child) =>
-          (child.status === "pending" || child.status === "running") &&
-          (child.parentAgentId === undefined ||
-            child.parentAgentId === options.agentId) &&
-          (child.parentConversationId === undefined ||
-            child.parentConversationId === options.conversationId),
-      ),
   });
   owners.set(options.ref, {
     control,

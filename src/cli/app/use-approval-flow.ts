@@ -1,4 +1,6 @@
 import { createApprovalExecutionOutput } from "./approval-execution-output";
+import { buildRetiredApprovalResults } from "./tui-approval-recovery";
+import { useTuiApprovalRetirement } from "./tui-approval-retirement";
 import { getTuiTurnControl } from "./tui-turn-owner";
 // src/cli/app/useApprovalFlow.ts
 
@@ -129,6 +131,7 @@ type ApprovalFlowContext = {
 };
 
 export function useApprovalFlow(ctx: ApprovalFlowContext) {
+  useTuiApprovalRetirement(ctx);
   const {
     abortControllerRef,
     agentId,
@@ -362,6 +365,7 @@ export function useApprovalFlow(ctx: ApprovalFlowContext) {
       if (logicalTurn !== getTuiTurnControl(abortControllerRef)) return;
       setIsExecutingTool(true);
       const approvalAbortController = new AbortController();
+      let enteredTurn = false;
       // Snapshot current state before clearing dialog. Companion results
       // (auto-handled + auto-denied) are built here — before the try — so
       // the catch below can still overlay them on a grace-expiry abort:
@@ -382,6 +386,16 @@ export function useApprovalFlow(ctx: ApprovalFlowContext) {
           logicalTurn?.signal.aborted ||
           abortControllerRef.current?.signal.aborted
         ) {
+          logicalTurn?.retireApprovalPause(() =>
+            queueApprovalResults(
+              buildRetiredApprovalResults(
+                pendingSnapshot,
+                approvalResultsSnapshot,
+                autoHandledSnapshot,
+                autoDeniedSnapshot,
+              ),
+            ),
+          );
           setStreaming(false);
           setIsExecutingTool(false);
           setPendingApprovals([]);
@@ -398,6 +412,8 @@ export function useApprovalFlow(ctx: ApprovalFlowContext) {
           return;
         }
 
+        logicalTurn?.enter();
+        enteredTurn = !!logicalTurn;
         // Clear dialog state immediately so UI updates right away
         setPendingApprovals([]);
         setApprovalContexts([]);
@@ -625,6 +641,7 @@ export function useApprovalFlow(ctx: ApprovalFlowContext) {
         syncTrajectoryElapsedBase();
         refreshDerived();
       } finally {
+        if (enteredTurn) await logicalTurn?.leave(false);
         // Release the guard only if no newer batch took over the refs.
         if (toolAbortControllerRef.current === approvalAbortController) {
           clearApprovalToolContext();

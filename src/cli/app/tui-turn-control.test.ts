@@ -10,7 +10,6 @@ function setup() {
     cancelRun: async (id) => {
       cancellations.push(id);
     },
-    hasChildren: () => false,
   });
   return {
     control,
@@ -93,7 +92,12 @@ test("exact backend cancellation failure never retargets and child ownership gap
       ids.push(id);
       throw new Error("cancel failed");
     },
-    hasChildren: () => true,
+    children: () => ({
+      cancel() {},
+      async wait() {
+        throw new Error("ownership gap");
+      },
+    }),
   });
   control.enter();
   control.beginBackend();
@@ -124,7 +128,17 @@ test.each(["inactive-owner", "stale-turn", "cached"])(
     const control = createTuiTurnControl({
       turn: { id: "one", agentId: "agent", conversationId: "conversation" },
       isCurrent: () => current,
-      hasChildren: () => children,
+      children: () => {
+        let captured = false;
+        return {
+          cancel() {
+            captured = children;
+          },
+          async wait() {
+            if (captured) throw new Error("ownership gap");
+          },
+        };
+      },
       cancelRun: async (id) => {
         cancelled.push(id);
       },

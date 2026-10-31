@@ -91,7 +91,7 @@ test("continuation cannot inherit a different agent's controller", () => {
 });
 
 test.each(["other", "same", "unowned"])(
-  "child %s conversation coverage is scoped and conservative",
+  "background child %s remains independent of parent interruption",
   async (scope) => {
     const childId = `child-scope-${scope}`;
     registerSubagent(
@@ -120,9 +120,7 @@ test.each(["other", "same", "unowned"])(
       const receipt = control.request(new AbortController().signal);
       control.leave(false);
       if (receipt.status !== "requested") throw new Error("missing receipt");
-      expect((await receipt.completion).status).toBe(
-        scope === "other" ? "settled" : "incomplete",
-      );
+      expect((await receipt.completion).status).toBe("settled");
     } finally {
       clearSubagentsByIds([childId]);
     }

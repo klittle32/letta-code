@@ -572,11 +572,44 @@ const subagentAbortHooks = new Map<string, () => void>();
  */
 export function registerSubagentAbortHook(id: string, hook: () => void): void {
   subagentAbortHooks.set(id, hook);
+  notifyListeners();
 }
 
 /** Remove a subagent's abort hook once its task has settled. */
 export function clearSubagentAbortHook(id: string): void {
   subagentAbortHooks.delete(id);
+}
+
+/** Stop exactly one child. Mark before firing so synchronous hook completion wins. */
+export function interruptSubagentById(
+  id: string,
+  errorMessage: string,
+): "requested" | "unavailable" | "inactive" {
+  const agent = store.agents.get(id);
+  if (!agent || (agent.status !== "pending" && agent.status !== "running"))
+    return "inactive";
+  const hook = subagentAbortHooks.get(id);
+  if (!hook) return "unavailable";
+  subagentAbortHooks.delete(id);
+  updateSubagent(id, {
+    status: "error",
+    error: errorMessage,
+    durationMs: Date.now() - agent.startTime,
+    cancelPending: true,
+    stopFailed: undefined,
+    stopAttempts: (agent.stopAttempts ?? 0) + 1,
+  });
+  try {
+    hook();
+  } catch (error) {
+    updateSubagent(id, {
+      status: "running",
+      cancelPending: undefined,
+      stopFailed: true,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return "requested";
 }
 
 /**
