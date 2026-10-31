@@ -372,6 +372,10 @@ export interface Backend {
   ): ReturnType<typeof forkConversationRequest>;
 
   getLocalStorageDir?(): string | undefined;
+  /** Actual local transcript store; may differ from provider/configuration storage.
+   * Absent means the backend does not expose a durable local store identity.
+   * Consumers must validate/canonicalize the path before using it as a namespace. */
+  readonly localConversationStorageDir?: string;
 }
 
 interface APIBackendDeps {

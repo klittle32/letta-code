@@ -33,6 +33,8 @@ export async function loadModConversationHistoryFromBackend(
   const page = await backend.listConversationMessages(conversationId, {
     limit: normalizeModConversationHistoryLimit(options?.limit),
     order: "desc",
+    ...(options?.before !== undefined ? { before: options.before } : {}),
+    ...(options?.after !== undefined ? { after: options.after } : {}),
     include_err: options?.includeErrors ?? true,
     ...(conversationId === "default" && agentId ? { agent_id: agentId } : {}),
   } as ConversationMessageListBody);

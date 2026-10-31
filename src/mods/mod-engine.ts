@@ -14,7 +14,6 @@ import { pathToFileURL } from "node:url";
 import type Letta from "@letta-ai/letta-client";
 import * as ts from "typescript";
 import { clearAvailableModelsCache } from "@/agent/available-models";
-import { sendMessageStreamWithBackend } from "@/agent/message";
 import type { Backend } from "@/backend";
 import type { PiProviderRegistration } from "@/backend/dev/pi-provider-mod-registry";
 import {
@@ -26,7 +25,6 @@ import {
   cloneModCapabilities,
   resolveModCapabilities,
 } from "@/mods/capabilities";
-import { createModConversationHandle } from "@/mods/conversation-handle";
 import {
   attachDeprecatedGetContextTrap,
   recordDeprecatedContextApiSourceDiagnostics,
@@ -92,7 +90,6 @@ import type {
   ModContext,
   ModDiagnostic,
   ModDiagnosticReportOptions,
-  ModDiagnosticSeverity,
   ModEventContext,
   ModEventEmissionResult,
   ModEventHandler,
@@ -116,6 +113,14 @@ import type {
   ModTurnStartEvent,
 } from "@/mods/types";
 import { createNoopModPanelHandle } from "@/mods/ui-helpers";
+import { normalizeReportedDiagnostic } from "./diagnostic-report";
+import { createEventConversationContext } from "./event-conversation-context";
+import { recordLegacyExtensionLoadedDiagnostic } from "./legacy-extension-diagnostic";
+import { waitForModLoad } from "./mod-load-cancellation";
+import {
+  bindModSessionContext,
+  type ModSessionActivationHandler,
+} from "./session-api";
 
 export type {
   LocalModSource,
@@ -215,6 +220,7 @@ type LocalModEventsRegistry = Partial<
 >;
 
 export interface LocalModRegistry {
+  onActivate?: ModSessionActivationHandler;
   capabilities: ModCapabilities;
   commands: Record<string, ModCommand>;
   diagnostics: ModDiagnostic[];
@@ -237,6 +243,7 @@ interface LocalModModule {
 }
 
 export interface LoadLocalModsOptions extends ResolveLocalModSourcesOptions {
+  signal?: AbortSignal;
   getClient: () => Promise<Letta>;
   capabilities?: ModCapabilities;
   builtinCommandIds?: Iterable<string>;
@@ -244,6 +251,7 @@ export interface LoadLocalModsOptions extends ResolveLocalModSourcesOptions {
   onChange?: () => void;
   onDiagnostic?: (diagnostic: ModDiagnostic) => void;
   onAsk?: ModQuestionHandler;
+  onActivate?: ModSessionActivationHandler;
   onNotification?: modInvocationContext.ModNotificationHandler;
   onRegistryCreated?: (registry: LocalModRegistry) => void;
   registerCapabilitiesGlobally?: boolean;
@@ -258,7 +266,7 @@ export interface ModEngine {
     context: ModContext,
   ) => Promise<ModEventEmissionResult<TName>>;
   getSnapshot: () => LocalModRegistry;
-  reload: () => Promise<void>;
+  reload: (signal?: AbortSignal) => Promise<void>;
   subscribe: (listener: () => void) => () => void;
 }
 
@@ -838,7 +846,17 @@ function createLettaModApi(
   reservedToolNames: Set<string>,
   signal: AbortSignal,
   onAsk: ModQuestionHandler | undefined,
+  onActivate: ModSessionActivationHandler | undefined,
 ): LettaModApi {
+  const bindSession = <T extends import("./types").ModInvocationContext>(
+    context: T,
+  ) =>
+    bindModSessionContext(
+      context,
+      owner,
+      signal,
+      capabilities.session?.activate ? onActivate : undefined,
+    );
   const isLive = () => isOwnerLive(registry, owner);
   const guardLive = (capability: ModDiagnostic["capability"]): boolean => {
     if (isLive()) return true;
@@ -974,29 +992,6 @@ function createLettaModApi(
     return () => unregisterProvider(name);
   };
 
-  const normalizeReportedDiagnostic = (
-    diagnostic: ModDiagnosticReportOptions,
-  ): { message: string; severity: ModDiagnosticSeverity } => {
-    if (!diagnostic || typeof diagnostic !== "object") {
-      throw new Error("Mod diagnostic report must be an object");
-    }
-    if (typeof diagnostic.message !== "string") {
-      throw new Error("Mod diagnostic report must include a message");
-    }
-    const message = diagnostic.message.trim();
-    if (message.length === 0) {
-      throw new Error("Mod diagnostic report message cannot be empty");
-    }
-    if (
-      diagnostic.severity !== undefined &&
-      diagnostic.severity !== "error" &&
-      diagnostic.severity !== "warning"
-    ) {
-      throw new Error("Mod diagnostic severity must be 'error' or 'warning'");
-    }
-    return { message, severity: diagnostic.severity ?? "error" };
-  };
-
   const reportDiagnostic = (diagnostic: ModDiagnosticReportOptions) => {
     if (!guardLive(undefined)) return;
     const normalized = normalizeReportedDiagnostic(diagnostic);
@@ -1095,9 +1090,11 @@ function createLettaModApi(
           ...normalized,
           run: (context) =>
             normalized.run(
-              bindModTurnContext(
-                context,
-                capabilities.turn?.interrupt ? signal : undefined,
+              bindSession(
+                bindModTurnContext(
+                  context,
+                  capabilities.turn?.interrupt ? signal : undefined,
+                ),
               ),
             ),
           recordDiagnostic: recordCapabilityDiagnostic,
@@ -1148,6 +1145,7 @@ function createLettaModApi(
         const definition: ModToolDefinition = {
           ...normalized,
           activationSignal: signal,
+          run: (context) => normalized.run(bindSession(context)),
           recordDiagnostic: recordCapabilityDiagnostic,
         };
         registry.tools[normalized.name] = definition;
@@ -1293,46 +1291,6 @@ function getModFactory(module: LocalModModule): unknown {
     : module.activate;
 }
 
-function getLegacyExtensionMigrationTarget(
-  source: LocalModSource,
-  modPath: string,
-): string {
-  const targetRoot =
-    source.legacyMigrationTargetRoot ?? getGlobalModsDirectory();
-  const relativePath = path.relative(source.root, modPath);
-  if (
-    !relativePath ||
-    relativePath.startsWith("..") ||
-    path.isAbsolute(relativePath)
-  ) {
-    return path.join(targetRoot, path.basename(modPath));
-  }
-  return path.join(targetRoot, relativePath);
-}
-
-function recordLegacyExtensionLoadedDiagnostic(
-  registry: LocalModRegistry,
-  owner: ModOwner,
-  source: LocalModSource,
-  onDiagnostic: ((diagnostic: ModDiagnostic) => void) | undefined,
-): void {
-  const error = new Error(
-    `Loaded legacy extension from ${owner.path}. Move it to ${getLegacyExtensionMigrationTarget(source, owner.path)}.`,
-  );
-  error.name = "LegacyExtensionLoaded";
-  error.stack = undefined;
-  recordModDiagnostic(
-    registry,
-    {
-      error,
-      owner,
-      phase: "legacy_extension",
-      severity: "warning",
-    },
-    onDiagnostic,
-  );
-}
-
 export async function loadLocalMods(
   options: LoadLocalModsOptions,
 ): Promise<LocalModRegistry> {
@@ -1346,6 +1304,9 @@ export async function loadLocalMods(
   const sources = resolveLocalModSources(options);
   const capabilities = resolveModCapabilities(options.capabilities);
   capabilities.ui.dialogs = capabilities.ui.dialogs === true && !!options.onAsk;
+  capabilities.session = {
+    activate: capabilities.session?.activate === true && !!options.onActivate,
+  };
   const generation = options.generation ?? 1;
   const builtinCommandIds = new Set([...(options.builtinCommandIds ?? [])]);
   const reservedToolNames = new Set([...(options.reservedToolNames ?? [])]);
@@ -1355,6 +1316,9 @@ export async function loadLocalMods(
     capabilities,
     options.registerCapabilitiesGlobally !== false,
   );
+  registry.onActivate = capabilities.session.activate
+    ? options.onActivate
+    : undefined;
   options.onRegistryCreated?.(registry);
 
   for (const source of sources) {
@@ -1372,6 +1336,7 @@ export async function loadLocalMods(
     }
 
     for (const modPath of source.files) {
+      if (options.signal?.aborted) return registry;
       const owner = createModOwner(modPath, source, generation);
       const abortController = new AbortController();
       let failurePhase: ModDiagnostic["phase"] = "import";
@@ -1412,8 +1377,9 @@ export async function loadLocalMods(
           source,
         );
         failurePhase = "import";
-        const module = (await import(
-          `${pathToFileURL(importPath).href}?mod=${mtimeMs}`
+        const module = (await waitForModLoad(
+          import(`${pathToFileURL(importPath).href}?mod=${mtimeMs}`),
+          options.signal,
         )) as LocalModModule;
         const factory = getModFactory(module);
         failurePhase = "activate";
@@ -1435,9 +1401,16 @@ export async function loadLocalMods(
           reservedToolNames,
           abortController.signal,
           options.onAsk,
+          options.onActivate,
         );
         const activate = factory as LettaModFactory;
-        const dispose = await changes.run(() => activate(api));
+        const dispose = await waitForModLoad(
+          changes.run(() => activate(api)),
+          options.signal,
+          (late) => {
+            if (typeof late === "function") late();
+          },
+        );
         if (typeof dispose === "function") {
           registry.disposers.push({
             abortController,
@@ -1526,28 +1499,21 @@ export async function emitLocalModEvent<TName extends ModEventName>(
           turn: registry.capabilities.turn?.interrupt
             ? bindModTurnHandle(context.turn, signal)
             : undefined,
-          agent: { ...context.agent, id: event.agentId ?? context.agent.id },
-          sessionId: event.conversationId ?? context.sessionId,
-          conversation: createModConversationHandle({
-            agentId:
-              typeof event.agentId === "string"
-                ? event.agentId
-                : context.agent.id,
-            backend,
-            conversationId:
-              typeof event.conversationId === "string"
-                ? event.conversationId
-                : context.sessionId,
-            sendMessageStream: sendMessageStreamWithBackend,
-            workingDirectory: context.cwd,
-          }),
+          ...createEventConversationContext(context, event, backend),
           signal: signal ?? new AbortController().signal,
         },
         recordEventDiagnostic,
         "ctx.getContext",
       );
       const result = await modInvocationContext.invoke(
-        eventContext,
+        registration.owner && signal
+          ? bindModSessionContext(
+              eventContext,
+              registration.owner,
+              signal,
+              registry.onActivate,
+            )
+          : eventContext,
         registration,
         event,
       );
@@ -1682,6 +1648,10 @@ export function createModEngine(options: CreateModEngineOptions): ModEngine {
   const capabilities = resolveModCapabilities(modOptions.capabilities);
   capabilities.ui.dialogs =
     capabilities.ui.dialogs === true && !!modOptions.onAsk;
+  capabilities.session = {
+    activate:
+      capabilities.session?.activate === true && !!modOptions.onActivate,
+  };
   const registerCapabilitiesGlobally =
     modOptions.registerCapabilitiesGlobally !== false;
   let activeRegistry = createEmptyModRegistry(
@@ -1700,7 +1670,8 @@ export function createModEngine(options: CreateModEngineOptions): ModEngine {
     }
   };
 
-  const reload = async () => {
+  const reload = async (signal?: AbortSignal) => {
+    signal?.throwIfAborted();
     if (disposed) return;
 
     disposeLocalMods(activeRegistry);
@@ -1718,6 +1689,7 @@ export function createModEngine(options: CreateModEngineOptions): ModEngine {
     const nextRegistry = await loadLocalMods({
       ...modOptions,
       generation: loadGeneration,
+      signal,
       onRegistryCreated: (registry) => {
         loadingRegistry = registry;
         if (!disposed && loadGeneration === generation) {
@@ -1746,6 +1718,17 @@ export function createModEngine(options: CreateModEngineOptions): ModEngine {
       },
     });
     loadingRegistry = nextRegistry;
+    if (signal?.aborted && loadGeneration === generation) {
+      disposeLocalMods(nextRegistry);
+      activeRegistry = createEmptyModRegistry(
+        resolveLocalModSources(modOptions),
+        ++generation,
+        capabilities,
+        registerCapabilitiesGlobally,
+      );
+      publish();
+      throw new Error("Mod loading cancelled", { cause: signal.reason });
+    }
     if (disposed || loadGeneration !== generation) {
       disposeLocalMods(nextRegistry);
       return;

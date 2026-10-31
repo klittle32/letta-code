@@ -129,9 +129,11 @@ export async function runModCommandWithTimeout(
   command: ModCommand,
   context: ModCommandContext,
   timeoutMs = MOD_COMMAND_TIMEOUT_MS,
+  onInvocationSignal?: (signal: AbortSignal) => () => void,
 ): Promise<ModCommandResult> {
   const invocation = new AbortController();
   let timeout: ReturnType<typeof setTimeout> | null = null;
+  let releaseInvocation: (() => void) | undefined;
   try {
     const invocationContext = attachDeprecatedGetContextTrap(
       {
@@ -144,6 +146,7 @@ export async function runModCommandWithTimeout(
       command.recordDiagnostic,
       "ctx.getContext",
     );
+    releaseInvocation = onInvocationSignal?.(invocationContext.signal);
     return normalizeModCommandResult(
       await Promise.race([
         Promise.resolve(
@@ -168,6 +171,7 @@ export async function runModCommandWithTimeout(
     });
     throw error;
   } finally {
+    releaseInvocation?.();
     if (timeout) {
       clearTimeout(timeout);
     }

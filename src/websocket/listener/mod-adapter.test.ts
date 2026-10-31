@@ -52,6 +52,7 @@ describe("listener mod adapter", () => {
   test("uses provider and tool capabilities", () => {
     expect(LISTENER_MOD_CAPABILITIES).toEqual({
       turn: { interrupt: false },
+      session: { activate: false },
       tools: true,
       commands: true,
       events: {

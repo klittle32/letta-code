@@ -151,7 +151,6 @@ import {
   wrapCronPrompt,
 } from "@/cron";
 import { experimentManager } from "@/experiments/manager";
-import { runSessionEndHooks, runSessionStartHooks } from "@/hooks";
 import type { ApprovalContext } from "@/permissions/analyzer";
 import { type PermissionMode, permissionMode } from "@/permissions/mode";
 import {
@@ -194,7 +193,6 @@ import {
 import {
   addToMessageQueue,
   type QueuedMessage,
-  setMessageQueueAdder,
 } from "@/utils/message-queue-bridge";
 import {
   appendTaskNotificationEventsToBuffer,
@@ -234,7 +232,10 @@ import {
   providerTypeFromModelSettings,
   reasoningEffortLlmConfigPatch,
 } from "./model-config";
+import { startTuiSessionHooks } from "./new-conversation";
 import { prepareSessionExit } from "./session";
+import { endTuiSession } from "./session-end";
+import { useTuiCommandLock } from "./tui-command-lock";
 import { attachTuiTurnContext, snapshotTuiModContext } from "./tui-turn-owner";
 import type {
   ActiveOverlay,
@@ -252,7 +253,12 @@ import { useFeedbackHandler } from "./use-feedback-handler";
 import { useInterruptHandler } from "./use-interrupt-handler";
 import { useQueuedApprovalSubmit } from "./use-queued-approval-submit";
 import { useReasoningCycle } from "./use-reasoning-cycle";
+import {
+  useSessionActivationBridge,
+  useTuiSessionActivation,
+} from "./use-session-activation";
 import { useSubmitHandler } from "./use-submit-handler";
+import { useTuiMessageQueueBridge } from "./use-tui-message-queue-bridge";
 
 function buildStartupCommandHints(options: {
   isResumingConversation: boolean;
@@ -525,8 +531,12 @@ export function App({
 
   // Whether a command is running (disables input but no streaming UI)
   // Uses synced state to keep ref in sync for reliable async checks
-  const [commandRunning, setCommandRunning, commandRunningRef] =
-    useSyncedState(false);
+  const [
+    commandRunning,
+    setCommandRunning,
+    commandRunningRef,
+    sessionCommandLock,
+  ] = useTuiCommandLock();
 
   // Profile load confirmation - when loading a profile and current agent is unsaved
   const [profileConfirmPending, setProfileConfirmPending] = useState<{
@@ -1141,60 +1151,24 @@ export function App({
       sessionHooksRanRef.current = true;
       // Determine if this is a new session or resumed
       const isNewSession = !initialConversationId;
-      runSessionStartHooks(
+      void startTuiSessionHooks(
+        { agentId, agentName, sessionStartFeedbackRef },
         isNewSession,
-        agentId,
-        agentName ?? undefined,
         conversationIdRef.current ?? undefined,
-      )
-        .then((result) => {
-          // Store feedback to prepend to first user message
-          if (result.feedback.length > 0) {
-            sessionStartFeedbackRef.current = result.feedback;
-          }
-        })
-        .catch(() => {
-          // Silently ignore hook errors
-        });
+      ).catch(() => {});
     }
   }, [agentId, agentName, initialConversationId]);
 
-  // Run SessionEnd hooks helper
   const runEndHooks = useCallback(
-    async (reason: ModConversationCloseReason = "quit") => {
-      const durationMs = Date.now() - sessionStartTimeRef.current;
-      try {
-        await runSessionEndHooks(
-          durationMs,
-          undefined,
-          undefined,
-          agentIdRef.current ?? undefined,
-          conversationIdRef.current ?? undefined,
-        );
-      } catch {
-        // Silently ignore hook errors
-      }
-
-      const modAdapter = modAdapterRef.current;
-      if (modAdapter) {
-        try {
-          await modAdapter.events.emit(
-            "conversation_close",
-            {
-              agentId: agentIdRef.current ?? null,
-              conversationId: conversationIdRef.current ?? null,
-              durationMs,
-              messageCount: telemetry.getMessageCount(),
-              reason,
-              toolCallCount: telemetry.getToolCallCount(),
-            },
-            modAdapter.context,
-          );
-        } catch {
-          // Mod lifecycle events are best-effort on shutdown.
-        }
-      }
-    },
+    (reason: ModConversationCloseReason = "quit", strict = false) =>
+      endTuiSession(
+        agentIdRef.current,
+        conversationIdRef.current,
+        Date.now() - sessionStartTimeRef.current,
+        modAdapterRef.current,
+        reason,
+        strict,
+      ),
     [],
   );
 
@@ -1416,29 +1390,6 @@ export function App({
   // Override content parts for queued submissions (to preserve part boundaries)
   const overrideContentPartsRef = useRef<MessageCreate["content"] | null>(null);
 
-  // Set up message queue bridge for background tasks
-  // This allows non-React code (Task.ts) to add notifications to queueDisplay
-  useEffect(() => {
-    // Enqueue via QueueRuntime — onEnqueued callback updates queueDisplay.
-    setMessageQueueAdder((message: QueuedMessage) => {
-      tuiQueueRef.current?.enqueue(
-        message.kind === "task_notification"
-          ? ({
-              kind: "task_notification",
-              source: "task_notification",
-              text: message.text,
-              content: message.content,
-            } as Parameters<typeof tuiQueueRef.current.enqueue>[0])
-          : ({
-              kind: "message",
-              source: message.source ?? "user",
-              content: message.text,
-            } as Parameters<typeof tuiQueueRef.current.enqueue>[0]),
-      );
-      setDequeueEpoch((e) => e + 1);
-    });
-    return () => setMessageQueueAdder(null);
-  }, []);
   // ── Shadow cron scheduler ──────────────────────────────────────────
   // Lightweight tui_cron scheduler when no matching WS listener is running.
   // Defers to a live all-owner or this agent's scoped backend owner.
@@ -1676,6 +1627,13 @@ export function App({
   const appendModNotification = useCallback(
     (message: string) => appendTaskNotificationEvents([message]),
     [appendTaskNotificationEvents],
+  );
+
+  useTuiMessageQueueBridge(
+    tuiQueueRef,
+    sessionCommandLock,
+    appendModNotification,
+    setDequeueEpoch,
   );
 
   // Queue callbacks remove consumed display entries by item ID.
@@ -2291,7 +2249,9 @@ export function App({
     modContext.agent.id,
     modContext.sessionId,
   );
+  const sessionActivation = useSessionActivationBridge();
   const modAdapter = useLocalModAdapter(modContext, {
+    onActivate: sessionActivation.onActivate,
     onAsk: modQuestions.ask,
     agentModsDirectory,
     disabled: modsDisabled,
@@ -3679,6 +3639,7 @@ export function App({
   }, [agentName, agentDescription, appendTaskNotificationEvents]);
 
   const processConversation = useConversationLoop({
+    sessionActivationBusy: () => sessionCommandLock.activationBusy,
     abortControllerRef,
     agentIdRef,
     appendError,
@@ -4133,7 +4094,9 @@ export function App({
     }
   }, [reflectionArenaChoicePending, appendTaskNotificationEvents]);
 
-  const onSubmit = useSubmitHandler({
+  const submitContext: import("./use-submit-handler").SubmitHandlerContext = {
+    onModInvocationSignal: sessionCommandLock.enterInvocation,
+    activationBusy: () => sessionCommandLock.activationBusy,
     abortControllerRef,
     agentDescription,
     agentId,
@@ -4239,6 +4202,22 @@ export function App({
     updateMemorySyncCommand,
     userCancelledRef,
     onReload: handleReload,
+  };
+  const onSubmit = useSubmitHandler(submitContext);
+  sessionActivation.handler.current = useTuiSessionActivation(submitContext, {
+    ask: modQuestions.ask,
+    lock: sessionCommandLock,
+    processing: processingConversationRef,
+    pendingApprovalResults: () => queuedApprovalResultsRef.current,
+    blockedUi:
+      anySelectorOpen ||
+      !!queuedOverlayAction ||
+      !!reflectionArenaChoicePending,
+    report: (error) =>
+      appendError(
+        `Session activation initialization failed: ${error instanceof Error ? error.message : String(error)}`,
+        true,
+      ),
   });
 
   const onSubmitRef = useRef(onSubmit);
@@ -4264,6 +4243,7 @@ export function App({
       !queuedOverlayAction && // Prioritize queued model/toolset/system switches before dequeuing messages
       pendingApprovals.length === 0 &&
       !commandRunning &&
+      !commandRunningRef.current &&
       !isExecutingTool &&
       !reflectionArenaChoicePending &&
       !modQuestions.pending &&
@@ -4339,6 +4319,7 @@ export function App({
     streaming,
     pendingApprovals,
     commandRunning,
+    commandRunningRef,
     isExecutingTool,
     reflectionArenaChoicePending,
     modQuestions.pending,
@@ -4400,6 +4381,7 @@ export function App({
     if (
       !streaming &&
       !commandRunning &&
+      !commandRunningRef.current &&
       !isExecutingTool &&
       pendingApprovals.length === 0 &&
       queuedOverlayAction !== null
@@ -4506,6 +4488,7 @@ export function App({
   }, [
     streaming,
     commandRunning,
+    commandRunningRef,
     isExecutingTool,
     pendingApprovals,
     handleAgentSelect,

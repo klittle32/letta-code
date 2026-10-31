@@ -58,10 +58,15 @@ const MCP_ORIGINATOR_SUPER_RUN_HEADER = "x-letta-mcp-originator-super-run-id";
 const CLOUD_API_SHUTDOWN_MAX_RETRIES = 3;
 const CLOUD_API_SHUTDOWN_DEFAULT_RETRY_DELAY_MS = 1000;
 const responseStateIdsByScope = new Map<string, string>();
+/** The send path needs only message transport, not ambient backend capabilities. */
+export type ConversationMessageTransport = Pick<
+  Backend,
+  "createConversationMessageStream"
+>;
 // Backend identity and agent/default-conversation scope must not share a
 // notification baseline. Discovery cache invalidation must not clear it either.
 const sentClientSkillsByBackend = new WeakMap<
-  Backend,
+  ConversationMessageTransport,
   Map<string, NonNullable<ConversationMessageCreateParams["client_skills"]>>
 >();
 
@@ -371,12 +376,11 @@ export async function sendMessageStream(
 }
 
 /**
- * Send a message through an explicit backend instance. Use this when a caller
- * composes several backend operations and needs fork/send to stay on the same
- * backend without reaching back through the global backend singleton.
+ * Send through an explicit backend or principal-bound message transport without
+ * reaching back through the global backend singleton for dispatch.
  */
 export async function sendMessageStreamWithBackend(
-  backend: Backend,
+  backend: ConversationMessageTransport,
   conversationId: string,
   messages: Array<MessageCreate | ApprovalCreate>,
   opts: SendMessageStreamOptions = { streamTokens: true, background: true },

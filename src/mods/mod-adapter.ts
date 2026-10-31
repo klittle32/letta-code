@@ -53,7 +53,7 @@ export interface ModAdapter {
   getBackend: () => Backend | undefined;
   getSnapshot: () => ModAdapterSnapshot;
   engine: ModEngine;
-  reload: () => Promise<void>;
+  reload: (signal?: AbortSignal) => Promise<void>;
   subscribe: (listener: () => void) => () => void;
 }
 
@@ -179,7 +179,7 @@ export function createModAdapter(options: CreateModAdapterOptions): ModAdapter {
 
   const getSnapshot = () => snapshot;
 
-  const reload = async () => {
+  const reload = async (signal?: AbortSignal) => {
     if (disposed) return;
     clearPendingDiagnosticsWrite();
 
@@ -194,7 +194,13 @@ export function createModAdapter(options: CreateModAdapterOptions): ModAdapter {
     };
     publish();
 
-    await engine.reload();
+    try {
+      await engine.reload(signal);
+    } catch (error) {
+      loadState = { ...loadState, isLoading: false };
+      publish();
+      throw error;
+    }
     if (disposed) return;
 
     const nextRegistry = engine.getSnapshot();

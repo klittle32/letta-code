@@ -1,6 +1,6 @@
 import { canonicalizeRoot } from "@/permissions/sandbox-policy";
 import { updateRuntimeContext } from "@/runtime-context";
-import { settingsManager } from "@/settings-manager";
+import { loadSettingsForWorkingDirectory } from "@/runtime-working-directory";
 import { getOrCreateProcessTransport } from "./connection";
 import {
   getConversationWorkingDirectory,
@@ -15,24 +15,6 @@ import { getConversationRuntime } from "./runtime";
 import { normalizeConversationId, normalizeCwdAgentId } from "./scope";
 import type { ListenerTransport } from "./transport";
 import type { ConversationRuntime, ListenerRuntime } from "./types";
-
-async function loadSettingsForWorkingDirectory(
-  workingDirectory: string,
-): Promise<void> {
-  await Promise.all([
-    settingsManager.loadProjectSettings(workingDirectory),
-    settingsManager.loadLocalProjectSettings(workingDirectory),
-  ]);
-}
-
-export async function switchCurrentRuntimeWorkingDirectory(
-  workingDirectory: string,
-): Promise<void> {
-  await loadSettingsForWorkingDirectory(workingDirectory);
-  process.chdir(workingDirectory);
-  process.env.USER_CWD = workingDirectory;
-  updateRuntimeContext({ workingDirectory });
-}
 
 /**
  * Updates a captured tool execution context so tool calls later in the SAME

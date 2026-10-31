@@ -142,19 +142,22 @@ import {
   type SharedReminderState,
 } from "@/reminders/state";
 import { getCurrentWorkingDirectory } from "@/runtime-context";
+import { switchCurrentRuntimeWorkingDirectory } from "@/runtime-working-directory";
 import { settingsManager } from "@/settings-manager";
 import { telemetry } from "@/telemetry";
 import { debugLog, debugWarn } from "@/utils/debug";
 import { detectShellContext } from "@/utils/shell-context";
 import { extractTaskNotificationsForDisplay } from "@/utils/task-notifications";
-import { switchCurrentRuntimeWorkingDirectory } from "@/websocket/listener/cwd-change";
-
 import {
   aliasBareExitCommand,
   shouldSlashCommandBypassQueue,
 } from "./command-routing";
 import { buildTextParts } from "./content-parts";
 import { appendOptimisticUserLine, createClientOtid, uid } from "./ids";
+import {
+  initializeNewTuiConversation,
+  installNewTuiConversation,
+} from "./new-conversation";
 import { prepareSessionExit } from "./session";
 import { handleConnectionCommand } from "./submit-connection-commands";
 import { handleDiagnosticsCommand } from "./submit-diagnostics-commands";
@@ -201,7 +204,9 @@ async function findCustomCommandByName(
   return findCustomCommand(commandName);
 }
 
-type SubmitHandlerContext = {
+export type SubmitHandlerContext = {
+  onModInvocationSignal?: (signal: AbortSignal) => () => void;
+  activationBusy?: () => boolean;
   abortControllerRef: MutableRefObject<AbortController | null>;
   agentDescription: string | null;
   agentId: string;
@@ -277,7 +282,10 @@ type SubmitHandlerContext = {
   resetDeferredToolCallCommits: () => void;
   resetPendingReasoningCycle: () => void;
   resetTrajectoryBases: () => void;
-  runEndHooks: (reason?: ModConversationCloseReason) => Promise<void>;
+  runEndHooks: (
+    reason?: ModConversationCloseReason,
+    strict?: boolean,
+  ) => Promise<void>;
   sessionHooksRanRef: MutableRefObject<boolean>;
   sessionStartFeedbackRef: MutableRefObject<string[]>;
   sessionStatsRef: MutableRefObject<SessionStats>;
@@ -587,6 +595,7 @@ export function useSubmitHandler(ctx: SubmitHandlerContext) {
       message?: string,
       submitOptions?: { userInitiated: boolean },
     ): Promise<{ submitted: boolean }> => {
+      if (ctx.activationBusy?.()) return { submitted: false };
       const commandScope = {
         agentId: agentIdRef.current,
         conversationId: conversationIdRef.current,
@@ -868,11 +877,22 @@ export function useSubmitHandler(ctx: SubmitHandlerContext) {
               permissionMode: modContext.permissionMode,
               rawInput: trimmed,
             };
+            const commandGeneration = conversationGenerationRef.current;
             const result = await runModCommandWithTimeout(
               matchedModCommand,
               commandContext,
+              undefined,
+              ctx.onModInvocationSignal,
             );
 
+            if (
+              commandGeneration !== conversationGenerationRef.current ||
+              commandContext.conversation.id !== conversationIdRef.current ||
+              commandContext.agent.id !== agentIdRef.current
+            ) {
+              cmd?.finish("Session changed.", true, true);
+              return { submitted: true };
+            }
             if (result.type === "prompt") {
               if (!showInTranscript) {
                 getFeedbackCommand().fail(
@@ -1779,51 +1799,13 @@ export function useSubmitHandler(ctx: SubmitHandlerContext) {
             setConversationAutoTitleEligibility(!conversationName);
             await maybeCarryOverActiveConversationModel(conversation.id);
 
-            // Update conversationId state and ref together so the next turn
-            // cannot observe a stale conversation handoff.
-            setConversationIdAndRef(conversation.id);
-
-            pendingConversationSwitchRef.current = {
-              origin: "new",
-              conversationId: conversation.id,
-              isDefault: false,
-            };
-
-            // Save the new session to settings
             settingsManager.persistSession(agentId, conversation.id);
-
-            // Reset context tokens for new conversation
-            resetContextHistory(contextTrackerRef.current);
-
-            // Ensure bootstrap reminders are re-injected for the new conversation.
-            resetBootstrapReminderState(true);
-
-            // Re-run SessionStart hooks for new conversation
-            sessionHooksRanRef.current = false;
-            runSessionStartHooks(
-              true, // isNewSession
-              agentId,
-              agentName ?? undefined,
+            installNewTuiConversation(ctx, conversation.id);
+            void initializeNewTuiConversation(
+              ctx,
               conversation.id,
-            )
-              .then((result) => {
-                if (result.feedback.length > 0) {
-                  sessionStartFeedbackRef.current = result.feedback;
-                }
-              })
-              .catch(() => {});
-            sessionHooksRanRef.current = true;
-            void modAdapter.events.emit(
-              "conversation_open",
-              {
-                agentId,
-                agentName: agentName ?? null,
-                conversationId: conversation.id,
-                previousConversationId: prevConversationId ?? null,
-                reason: "new",
-              },
-              modAdapter.context,
-            );
+              prevConversationId,
+            ).catch(() => {});
 
             // Update command with success
             cmd.finish(

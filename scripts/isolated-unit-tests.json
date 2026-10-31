@@ -267,6 +267,11 @@
       "reason": "Mutates HOME and the remote-settings singleton to verify startup cwd-map repair."
     },
     {
+      "path": "src/cli/tui-session-activation.test.tsx",
+      "timeoutMs": 30000,
+      "reason": "Mounts the real TUI and mutates cwd, HOME, settings, backend, and mod registry to verify trusted exact-session activation."
+    },
+    {
       "path": "src/cli/tui-approval-scope-retirement.test.tsx",
       "timeoutMs": 30000,
       "reason": "Mounts the native approval retirement hook with real scope replacement before passive effects and a scoped backend recovery batch."

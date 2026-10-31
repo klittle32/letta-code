@@ -75,6 +75,7 @@ function approvalStream(
   } as unknown as Stream<LettaStreamingResponse>;
 }
 type State = {
+  sessionActivation?: boolean;
   onRun?: () => void;
   stripApprovalInput?: boolean;
   early: boolean;
@@ -103,7 +104,7 @@ async function harness(executor: HeadlessTurnExecutor, state: State) {
   writeFileSync(
     join(mods, "retirement.ts"),
     `export default function(letta){
-  const state=globalThis.__tuiRetirement;
+  const state=globalThis.__tuiRetirement;state.sessionActivation=letta.capabilities.session?.activate;
   letta.events.on("turn_start",(event,ctx)=>{state.starts.push(ctx.turn);if(state.stripApprovalInput)return {input:event.input.filter(item=>item.type!=="approval")};});
   letta.events.on("turn_end",(event,ctx)=>{state.ends.push({id:ctx.turn.id,reason:event.stopReason});if(event.stopReason!=="end_turn")return {continue:"DO NOT SEND AFTER INTERRUPTION"};});
   letta.tools.register({name:"pause_tool",description:"Pause tool",approvalPolicy:"alwaysAsk",parameters:{type:"object",properties:{}},async run(){state.toolRuns++;state.running=true;state.onRun?.();if(state.hold)await state.hold;return "real tool output";}});
@@ -138,6 +139,7 @@ async function harness(executor: HeadlessTurnExecutor, state: State) {
   );
   await waitFor(isQueueBridgeConnected, "TUI ready");
   await Bun.sleep(100);
+  expect(state.sessionActivation).toBe(true);
   return {
     backend,
     stdin,

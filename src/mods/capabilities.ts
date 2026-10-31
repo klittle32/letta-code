@@ -2,6 +2,7 @@ import type { ModCapabilities } from "@/mods/types";
 
 export const MOD_CAPABILITY_IDS = [
   "turn.interrupt",
+  "session.activate",
   "tools",
   "commands",
   "providers",
@@ -25,6 +26,7 @@ export function isModCapabilityId(value: string): value is ModCapabilityId {
 
 export const DEFAULT_MOD_CAPABILITIES: ModCapabilities = {
   turn: { interrupt: false },
+  session: { activate: false },
   tools: true,
   commands: true,
   events: {
@@ -44,6 +46,7 @@ export const DEFAULT_MOD_CAPABILITIES: ModCapabilities = {
 
 export const DISABLED_MOD_CAPABILITIES: ModCapabilities = {
   turn: { interrupt: false },
+  session: { activate: false },
   tools: false,
   commands: false,
   events: {
@@ -90,6 +93,7 @@ export function cloneModCapabilities(
 ): ModCapabilities {
   return {
     turn: { interrupt: capabilities.turn?.interrupt === true },
+    session: { activate: capabilities.session?.activate === true },
     tools: capabilities.tools,
     commands: capabilities.commands,
     events: {

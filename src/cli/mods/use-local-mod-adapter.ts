@@ -2,6 +2,7 @@ import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { getBackend } from "@/backend";
 import { getClient } from "@/backend/api/client";
 import type { ModQuestionHandler } from "@/mods/question-api";
+import type { ModSessionActivationHandler } from "@/mods/session-api";
 import {
   createModAdapter,
   type ModAdapter,
@@ -18,7 +19,7 @@ export interface LocalModAdapter {
   engine: ModAdapter["engine"];
   isLoading: boolean;
   registry: ModAdapterSnapshot["registry"];
-  reload: () => Promise<void>;
+  reload: (signal?: AbortSignal) => Promise<void>;
 }
 
 export function useLocalModAdapter(
@@ -27,6 +28,7 @@ export function useLocalModAdapter(
     agentModsDirectory?: string | null;
     disabled?: boolean;
     onAsk?: ModQuestionHandler;
+    onActivate?: ModSessionActivationHandler;
     onNotification?: (message: string) => void;
   } = {},
 ): LocalModAdapter {
@@ -40,9 +42,16 @@ export function useLocalModAdapter(
         getBackend,
         getClient,
         onAsk: options.onAsk,
+        onActivate: options.onActivate,
         onNotification: options.onNotification,
       }),
-    [agentModsDirectory, disabled, options.onNotification, options.onAsk],
+    [
+      agentModsDirectory,
+      disabled,
+      options.onNotification,
+      options.onAsk,
+      options.onActivate,
+    ],
   );
 
   const snapshot = useSyncExternalStore(

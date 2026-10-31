@@ -99,6 +99,7 @@ export interface ModEventCapabilities {
 }
 
 export interface ModCapabilities {
+  session?: { activate: boolean };
   /** Exact-turn request receipts; omitted means unsupported. */
   turn?: { interrupt: boolean };
   tools: boolean;
@@ -134,6 +135,10 @@ export interface ModConversationSendMessageRequestOptions {
 }
 
 export interface ModConversationHistoryOptions {
+  /** Exclusive message-ID cursor: select messages older than this message. */
+  before?: string;
+  /** Exclusive message-ID cursor: select messages newer than this message. */
+  after?: string;
   /** Maximum number of recent messages to return. Defaults to 100. */
   limit?: number;
   /** Return chronological (asc, default) or newest-first (desc) messages. */
@@ -475,7 +480,25 @@ export interface ModTurnHandle extends InterruptTurnRef {
   requestInterrupt(reason?: string): TurnInterruptRequestResult;
 }
 
+export interface ModSessionActivationOptions {
+  conversationId: string;
+  workingDirectory: string;
+  signal?: AbortSignal;
+}
+export type ModSessionActivationResult =
+  | {
+      status: "activated";
+      initialization: "pending";
+      conversationId: string;
+      workingDirectory: string;
+    }
+  | { status: "refused"; reason: string };
 export interface ModContext {
+  session?: {
+    activate(
+      options: ModSessionActivationOptions,
+    ): Promise<ModSessionActivationResult>;
+  };
   /** Exact observed logical host turn; absent on unsupported hosts or while idle. */
   turn?: ModTurnHandle;
   app: {

@@ -191,6 +191,7 @@ export class LocalBackend extends HeadlessBackend {
 
   private readonly memoryDir?: string;
   private readonly storageDir: string;
+  readonly localConversationStorageDir: string;
   private readonly piModelsRuntime: LocalPiModelsRuntime;
   private readonly complete?: LocalCompleteFunction;
   private readonly memfsEnabledOverride?: boolean;
@@ -203,7 +204,7 @@ export class LocalBackend extends HeadlessBackend {
       options.modelsRuntime ??
       new LocalPiModelsRuntime({ storageDir: options.storageDir });
     const modelConfig = resolveLocalModelConfig(options.storageDir, runtime);
-    const storeOptions: LocalStoreOptions = {
+    const storeOptions = {
       storageDir: options.stateStorageDir ?? options.storageDir,
       seedDefaultAgent: false,
       strictAgentAccess: true,
@@ -216,7 +217,7 @@ export class LocalBackend extends HeadlessBackend {
       conversationIdPrefix: "local-conv-",
       storedMessageIdPrefix: "letta-msg-",
       localMessageIdPrefix: "ui-msg-",
-    };
+    } satisfies LocalStoreOptions;
     super(
       options.defaultAgentId ?? "agent-local-default",
       createLocalExecutor(
@@ -242,6 +243,7 @@ export class LocalBackend extends HeadlessBackend {
     );
     localBackendRef.current = this;
     this.storageDir = options.storageDir;
+    this.localConversationStorageDir = storeOptions.storageDir;
     this.memoryDir = options.memoryDir;
     this.complete = options.complete;
     this.memfsEnabledOverride = options.memfsEnabled;

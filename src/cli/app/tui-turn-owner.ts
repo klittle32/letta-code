@@ -17,6 +17,21 @@ const owners = new WeakMap<
   }
 >();
 
+const unsettled = new WeakMap<ControllerRef, Set<Control>>();
+export function hasUnsettledTuiTurns(
+  ref: ControllerRef,
+  agentId: string,
+  conversationId: string,
+): boolean {
+  return [...(unsettled.get(ref) ?? [])].some(
+    (control) =>
+      control.turn.agentId === agentId &&
+      control.turn.conversationId === conversationId &&
+      (control.active ||
+        control.executionSettlement.pendingToolCallIds().length > 0),
+  );
+}
+
 export function getTuiTurnControl(ref: ControllerRef): Control | undefined {
   return owners.get(ref)?.control;
 }
@@ -92,6 +107,14 @@ export function enterTuiLogicalTurn(options: {
       );
     },
   });
+  let pending = unsettled.get(options.ref);
+  if (!pending) {
+    pending = new Set();
+    unsettled.set(options.ref, pending);
+  }
+  pending.add(control);
+  const owned = pending;
+  void control.whenQuiescent().then(() => owned.delete(control));
   owners.set(options.ref, {
     control,
     generation: options.generation,

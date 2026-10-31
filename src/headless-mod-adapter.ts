@@ -20,6 +20,7 @@ import { getVersion } from "@/version";
 
 export const HEADLESS_MOD_CAPABILITIES: ModCapabilities = {
   turn: { interrupt: false },
+  session: { activate: false },
   tools: true,
   commands: false,
   events: {

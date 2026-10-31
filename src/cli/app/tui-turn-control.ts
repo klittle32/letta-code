@@ -125,6 +125,10 @@ export function createTuiTurnControl(options: {
     signal: abortController.signal,
     abortController,
     executionSettlement,
+    async whenQuiescent() {
+      await ownerDone;
+      await executionSettlement.waitForSettlement();
+    },
     get active() {
       return active;
     },

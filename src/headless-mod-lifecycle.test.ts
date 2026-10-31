@@ -37,6 +37,7 @@ describe("headless mod adapter", () => {
   test("uses headless mod capabilities", () => {
     expect(HEADLESS_MOD_CAPABILITIES).toEqual({
       turn: { interrupt: false },
+      session: { activate: false },
       tools: true,
       commands: false,
       events: {

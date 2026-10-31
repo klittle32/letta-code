@@ -23,6 +23,7 @@ import type { ListenerRuntime } from "./types";
 
 export const LISTENER_MOD_CAPABILITIES: ModCapabilities = {
   turn: { interrupt: false },
+  session: { activate: false },
   tools: true,
   commands: true,
   events: {

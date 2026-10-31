@@ -1,7 +1,7 @@
 import type { RuntimeContextSnapshot } from "@/runtime-context";
+import { switchCurrentRuntimeWorkingDirectory } from "@/runtime-working-directory";
 import {
   switchConversationWorkingDirectory,
-  switchCurrentRuntimeWorkingDirectory,
   updateToolExecutionContextCwd,
 } from "@/websocket/listener/cwd-change";
 import { getActiveRuntime } from "@/websocket/listener/runtime";

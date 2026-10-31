@@ -175,6 +175,7 @@ function makeExecutionPhaseHook(
 }
 
 type ConversationLoopContext = {
+  sessionActivationBusy?: () => boolean;
   abortControllerRef: MutableRefObject<AbortController | null>;
   agentIdRef: MutableRefObject<string>;
   appendError: AppendError;
@@ -472,6 +473,7 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
       initialInput: Array<MessageCreate | ApprovalCreate>,
       options?: import("./types").ProcessConversationOptions,
     ): Promise<void> => {
+      if (ctx.sessionActivationBusy?.()) return;
       // Pre-stream retries can yield for seconds: pin the user's permission
       // mode so auto-approvals don't regress after a retry.
       const pinnedPermissionMode = uiPermissionModeRef.current;
@@ -599,6 +601,9 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
       let awaitingApproval = false;
       let terminalReason = "error";
       const turnAbortController = logicalTurn.abortController;
+      const ownsTurn = () =>
+        myGeneration === conversationGenerationRef.current &&
+        abortControllerRef.current === turnAbortController;
       try {
         currentInput = await recoverTuiApprovalInput(
           abortControllerRef,
@@ -608,14 +613,9 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
             !logicalTurn.signal.aborted &&
             !turnStartCancelReason &&
             !userCancelledRef.current &&
-            myGeneration === conversationGenerationRef.current &&
-            abortControllerRef.current === turnAbortController,
+            ownsTurn(),
         );
-        if (
-          myGeneration !== conversationGenerationRef.current ||
-          abortControllerRef.current !== turnAbortController
-        )
-          return;
+        if (!ownsTurn()) return;
         if (logicalTurn.signal.aborted) {
           setStreaming(false);
           return;

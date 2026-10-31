@@ -653,7 +653,7 @@ export function repairSyntheticConversationTimestamps(
       ? (lastMessageAt ?? timing.updatedAt ?? conversation.updated_at)
       : conversation.updated_at,
     last_message_at:
-      !conversation.last_message_at ||
+      (!conversation.last_message_at && !!lastMessageAt) ||
       isSyntheticLocalTimestamp(conversation.last_message_at)
         ? (lastMessageAt ?? timing.updatedAt ?? conversation.last_message_at)
         : conversation.last_message_at,

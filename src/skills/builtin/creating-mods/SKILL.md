@@ -100,6 +100,7 @@ Guard each registration on every capability its behavior depends on — not just
 - In commands and events, use `ctx.conversation` for conversation operations:
   - `ctx.conversation.getHistory()` for recent messages
   - `ctx.conversation.create()` for a fresh, inactive conversation without copying history or sending a prompt; read [fresh creation](references/conversation-creation.md) for inheritance and failure recovery
+  - Trusted TUI activation of an exact fresh conversation and cwd: [session activation](references/session-activation.md)
   - `ctx.conversation.fork()` for independent/background model work
   - `forked.sendMessageStream([...])` to stream from a fork
 - In tools, use `ctx.conversation.getHistory()` when the tool needs recent context.
