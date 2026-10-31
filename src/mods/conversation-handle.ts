@@ -1,7 +1,10 @@
+import { snapshotConversationModel } from "@/agent/conversation-model-snapshot";
 import { updateModelConfig } from "@/agent/modify";
 import type { Backend } from "@/backend";
+import { ModConversationCreationError } from "@/mods/conversation-creation-error";
 import { loadModConversationHistoryFromBackend } from "@/mods/conversation-history";
 import { publishConversationTitleChange } from "@/mods/conversation-title-events";
+import { getModInvocationContext } from "@/mods/invocation-context";
 import type {
   ModConversationHandle,
   ModConversationMessage,
@@ -35,6 +38,66 @@ export function createModConversationHandle(options: {
 
   return {
     id: options.conversationId ?? null,
+    async create(createOptions = {}) {
+      // Capture all identities before the first await. Never consult a mutable
+      // active-session ref to finish an operation started in another scope.
+      const backend = requireBackend();
+      const agentId = options.agentId;
+      const sourceId = options.conversationId ?? null;
+      const workingDirectory = options.workingDirectory;
+      const sendMessageStream = options.sendMessageStream;
+      const invocation = getModInvocationContext();
+      const signal = invocation?.signal;
+      if (!agentId) throw new Error("Mod create: agentId is not available");
+      if (
+        invocation &&
+        (invocation.agent.id !== agentId || invocation.sessionId !== sourceId)
+      ) {
+        throw new Error(
+          "Mod create: invocation scope does not match the source handle",
+        );
+      }
+      signal?.throwIfAborted();
+      const { inheritModel, title } = createOptions;
+      const snapshot = inheritModel
+        ? await snapshotConversationModel(backend, agentId, sourceId)
+        : undefined;
+      signal?.throwIfAborted();
+      const created = await backend.createConversation({
+        agent_id: agentId,
+        ...(title !== undefined ? { summary: title } : {}),
+        ...(snapshot
+          ? {
+              model: snapshot.model,
+              ...(snapshot.model_settings !== undefined
+                ? { model_settings: snapshot.model_settings }
+                : {}),
+            }
+          : {}),
+      });
+      // Do not abort the create request itself: after an ID is returned, even
+      // cancellation must carry that ID. Pre-return backend failures stay unknown.
+      try {
+        signal?.throwIfAborted();
+        if (snapshot?.contextWindow !== undefined) {
+          await updateModelConfig(
+            backend,
+            { scope: "conversation", conversationId: created.id, agentId },
+            { contextWindow: snapshot.contextWindow },
+          );
+        }
+        signal?.throwIfAborted();
+      } catch (cause) {
+        throw new ModConversationCreationError(agentId, created.id, cause);
+      }
+      return createModConversationHandle({
+        agentId,
+        backend,
+        conversationId: created.id,
+        workingDirectory,
+        sendMessageStream,
+      });
+    },
     async fork(forkOptions) {
       const forked = await requireBackend().forkConversation(conversationId, {
         ...(options.agentId ? { agentId: options.agentId } : {}),

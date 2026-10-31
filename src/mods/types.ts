@@ -156,8 +156,24 @@ export interface ModUpdateLlmConfigOptions {
   scope?: "conversation" | "agent";
 }
 
+export interface ModConversationCreateOptions {
+  /** Snapshot the source conversation's effective model/settings. */
+  inheritModel?: boolean;
+  title?: string;
+}
+
 export interface ModConversationHandle {
   id: string | null;
+  /**
+   * Create an inactive conversation for this agent, without sending or copying
+   * history. Defaults to fresh agent settings. Inert is not side-effect-free:
+   * backend memory/system-prompt preparation may run. A backend failure before
+   * returning an ID can leave creation status unknown. Post-create preparation
+   * failures throw ModConversationCreationError with agentId/conversationId.
+   */
+  create: (
+    options?: ModConversationCreateOptions,
+  ) => Promise<ModConversationHandle>;
   fork: (
     options?: ModConversationForkOptions,
   ) => Promise<ModConversationHandle>;

@@ -20,7 +20,11 @@ import {
 } from "@/cli/mods/local-mod-loader";
 import { getModErrorDiagnostics } from "@/mods/mod-diagnostics";
 import { clearModTools } from "@/mods/tool-registry";
-import type { ModContext, ModDiagnostic } from "@/mods/types";
+import type {
+  ModCommandContext,
+  ModContext,
+  ModDiagnostic,
+} from "@/mods/types";
 
 function createTempDir(): string {
   return mkdtempSync(path.join(tmpdir(), "letta-mods-"));
@@ -35,6 +39,20 @@ function createModContext(): ModContext {
     projectDirectory: "/tmp/project",
     toolset: "default",
   });
+}
+
+function createConversationStub(): ModCommandContext["conversation"] {
+  const unsupported = async () => {
+    throw new Error("not implemented");
+  };
+  return {
+    id: "conversation-1",
+    create: unsupported,
+    fork: unsupported,
+    getHistory: async () => [],
+    sendMessageStream: async () => (async function* () {})(),
+    updateLlmConfig: async () => {},
+  };
 }
 
 function renderCtx(width: number) {
@@ -633,15 +651,7 @@ export default function(letta) {
             args: "123",
             argv: ["123"],
             command: "review-pr",
-            conversation: {
-              id: "conversation-1",
-              fork: async () => {
-                throw new Error("not implemented");
-              },
-              getHistory: async () => [],
-              sendMessageStream: async () => (async function* () {})(),
-              updateLlmConfig: async () => {},
-            },
+            conversation: createConversationStub(),
             cwd: "/tmp/project",
             model: {
               displayName: "Sonnet",
@@ -690,15 +700,7 @@ export default function(letta) {
                 args: "",
                 argv: [],
                 command: "legacy-command",
-                conversation: {
-                  id: "conversation-1",
-                  fork: async () => {
-                    throw new Error("not implemented");
-                  },
-                  getHistory: async () => [],
-                  sendMessageStream: async () => (async function* () {})(),
-                  updateLlmConfig: async () => {},
-                },
+                conversation: createConversationStub(),
                 rawInput: "/legacy-command",
               })
             : Promise.resolve({ type: "handled" as const }),
@@ -747,15 +749,7 @@ export default function(letta) {
             args: "",
             argv: [],
             command: "client-check",
-            conversation: {
-              id: "conversation-1",
-              fork: async () => {
-                throw new Error("not implemented");
-              },
-              getHistory: async () => [],
-              sendMessageStream: async () => (async function* () {})(),
-              updateLlmConfig: async () => {},
-            },
+            conversation: createConversationStub(),
             cwd: "/tmp/project",
             model: {
               displayName: "Sonnet",

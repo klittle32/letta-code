@@ -65,6 +65,9 @@ function createContext(memoryDir: string): ModContext {
 function createConversation(): ModConversationHandle {
   return {
     id: "conversation-1",
+    async create() {
+      return createConversation();
+    },
     async fork() {
       return createConversation();
     },
