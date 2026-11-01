@@ -6,6 +6,7 @@ import { actingUserRequestOptions } from "@/agent/acting-user";
 import {
   getStreamRequestContext,
   getStreamRequestStartTime,
+  inheritStreamRequestContext,
 } from "@/agent/message";
 import {
   type ConversationMessageStreamBody,
@@ -157,10 +158,13 @@ export async function drainStream(
     canResumeWithoutRunId: () => Boolean(requestContext?.otid),
     retrieveRunStatus: async (runId, signal) =>
       (
-        await getBackend().retrieveRun(runId, {
-          ...(actingUserRequestOptions(recoveryActingUserId) ?? {}),
-          signal,
-        } as RunRetrieveOptions)
+        await (requestContext?.recoveryTransport ?? getBackend()).retrieveRun(
+          runId,
+          {
+            ...(actingUserRequestOptions(recoveryActingUserId) ?? {}),
+            signal,
+          } as RunRetrieveOptions,
+        )
       ).status,
     abortHttpRead: () => abortStreamController(stream, "stall_reconciler"),
   });
@@ -612,8 +616,8 @@ export async function drainStreamWithResume(
         "Mid-stream resume: will use OTID-based conversations stream (otid=%s)",
         streamOtid,
       );
-    } else {
-      // Fallback: timestamp-based run discovery.
+    } else if (!streamRequestContext.recoveryTransport) {
+      // Captured sessions cannot use ambient timestamp-based discovery.
       try {
         debugLog(
           "stream",
@@ -672,7 +676,9 @@ export async function drainStreamWithResume(
   ) {
     try {
       replayGenericError = isReplayableRun(
-        await getBackend().retrieveRun(runIdToResume, recoveryRequestOptions),
+        await (
+          streamRequestContext?.recoveryTransport ?? getBackend()
+        ).retrieveRun(runIdToResume, recoveryRequestOptions),
       );
     } catch {
       // If status cannot be checked, keep the streamed stop reason authoritative.
@@ -696,7 +702,7 @@ export async function drainStreamWithResume(
     let originalApproval = result.approval;
 
     try {
-      const backend = getBackend();
+      const backend = streamRequestContext?.recoveryTransport ?? getBackend();
       const policy = resumePolicy ?? {
         initialDelayMs: 0,
         maxAttempts: 1,
@@ -771,6 +777,7 @@ export async function drainStreamWithResume(
           }
           resumeAbortRelay?.attach(resumeStream as object);
 
+          inheritStreamRequestContext(stream, resumeStream);
           const candidate = await drainStream(
             resumeStream,
             buffers,

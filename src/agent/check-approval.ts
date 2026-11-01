@@ -8,6 +8,7 @@ import type {
   MessageType,
 } from "@letta-ai/letta-client/resources/agents/messages";
 import type { Conversation } from "@letta-ai/letta-client/resources/conversations/conversations";
+import { getHostContextRecords } from "@/agent/host-context-records";
 import { getBackend } from "@/backend";
 import type { ApprovalRequest } from "@/cli/helpers/stream";
 import { debugLog, debugWarn, isDebugEnabled } from "@/utils/debug";
@@ -477,9 +478,15 @@ async function fetchResumeTail(
 
   return {
     conversation: tail.conversation,
-    messages: collectResumeTailMessages(tail.messages, {
-      warnIfMissingAssistant,
-    }),
+    messages: collectResumeTailMessages(
+      await getHostContextRecords().projectMessages(
+        { agentId, conversationId },
+        tail.messages,
+      ),
+      {
+        warnIfMissingAssistant,
+      },
+    ),
   };
 }
 

@@ -38,6 +38,8 @@ export async function composePassiveContextInput(options: {
   inbox: ContextInbox;
   input: readonly Input[];
   provenance: PassiveContextProvenance;
+  /** Final host-composed request hash, including runtime reminders/options. */
+  requestFingerprint?: string;
 }): Promise<PassiveContextInputResult> {
   const { inbox, provenance } = options;
   if (provenance.kind === "automated")
@@ -73,7 +75,7 @@ export async function composePassiveContextInput(options: {
     .digest("hex");
   const binding = await inbox.bindExplicitSubmission(
     provenance.userOtid,
-    requestFingerprint,
+    options.requestFingerprint ?? requestFingerprint,
   );
   if (binding.outcome !== "prepared")
     return {

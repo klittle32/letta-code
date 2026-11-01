@@ -265,3 +265,58 @@ test.each(["wrong-run", "wrong-agent", "unavailable", "cancel-rejected"])(
     }
   },
 );
+
+test("captured turn cancel uses its exact run and never the ambient conversation", async () => {
+  const { setTurnMessageTransport } = await import(
+    "@/agent/message-transport-owner"
+  );
+  const { cancelTuiBackendConversation, assertTuiAutomaticRetry } =
+    await import("./tui-turn-owner");
+  const original: Backend = new FakeHeadlessBackend("agent", {
+    async execute() {
+      return createAssistantMessageStream();
+    },
+  });
+  const ambient: Backend = new FakeHeadlessBackend("agent", {
+    async execute() {
+      return createAssistantMessageStream();
+    },
+  });
+  let foreign = 0;
+  const cancelled: string[] = [];
+  ambient.cancelConversation = async () => {
+    foreign++;
+    throw new Error("wrong principal");
+  };
+  original.cancelRun = async (_agent, id) => {
+    cancelled.push(id);
+    return { [id]: "cancelled" };
+  };
+  __testSetBackend(original);
+  const ref = { current: null as AbortController | null };
+  const control = enterTuiLogicalTurn({
+    ref,
+    generationRef: { current: 0 },
+    generation: 0,
+    continuation: false,
+    agentId: "agent",
+    conversationId: "conversation",
+  });
+  try {
+    setTurnMessageTransport(control.signal, original, original, "human");
+    __testSetBackend(ambient);
+    await expect(
+      cancelTuiBackendConversation(ref, "conversation"),
+    ).rejects.toThrow("no proven run identity");
+    expect(() => assertTuiAutomaticRetry(ref)).toThrow(
+      "automatic request replay",
+    );
+    control.observeRun("original-run");
+    await cancelTuiBackendConversation(ref, "conversation");
+    expect(cancelled).toEqual(["original-run"]);
+    expect(foreign).toBe(0);
+  } finally {
+    await control.leave(false);
+    __testSetBackend(null);
+  }
+});

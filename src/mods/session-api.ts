@@ -1,3 +1,4 @@
+import { getHostContextRecords } from "@/agent/host-context-records";
 import type {
   ModInvocationContext,
   ModOwner,
@@ -24,6 +25,7 @@ export function bindModSessionContext<T extends ModInvocationContext>(
   owner: ModOwner,
   ownerSignal: AbortSignal,
   handler?: ModSessionActivationHandler,
+  contextRecords = false,
 ): T {
   const source = {
     agentId: context.agent.id,
@@ -63,8 +65,28 @@ export function bindModSessionContext<T extends ModInvocationContext>(
       });
     },
   };
+  const records =
+    contextRecords && source.agentId && source.sourceConversationId
+      ? getHostContextRecords().context(
+          {
+            agentId: source.agentId,
+            conversationId: source.sourceConversationId,
+          },
+          AbortSignal.any([
+            ownerSignal,
+            ...(invocationSignal ? [invocationSignal] : []),
+          ]),
+        )
+      : undefined;
+  const conversation =
+    "conversation" in context &&
+    context.conversation &&
+    typeof context.conversation === "object"
+      ? { ...context.conversation, context: records }
+      : undefined;
   return new Proxy(context, {
     get(target, property, receiver) {
+      if (property === "conversation") return conversation;
       return property === "session"
         ? session
         : Reflect.get(target, property, receiver);

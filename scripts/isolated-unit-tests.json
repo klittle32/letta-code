@@ -280,6 +280,26 @@
       "path": "src/cli/tui-turn-interruption.test.tsx",
       "timeoutMs": 30000,
       "reason": "Mounts the real TUI with temporary HOME, settings, mod registry and backend to verify exact-turn retirement and terminal events."
+    },
+    {
+      "path": "src/mods/context-records-api.test.ts",
+      "timeoutMs": 30000,
+      "reason": "Loads real mod commands and TUI message composition with process-global backend, config and captured context owner."
+    },
+    {
+      "path": "src/cli/tui-passive-context.test.tsx",
+      "timeoutMs": 30000,
+      "reason": "Renders the real TUI and loads a mod against isolated local storage with process-global settings, backend, queue and environment."
+    },
+    {
+      "path": "src/agent/passive-context-integration.test.ts",
+      "timeoutMs": 30000,
+      "reason": "Replaces process-global backend to verify captured stream recovery and stable skills owner."
+    },
+    {
+      "path": "src/agent/passive-context-regressions.test.ts",
+      "timeoutMs": 30000,
+      "reason": "Replaces process-global backend/config for restart projection and pending-approval recovery during metadata outages."
     }
   ]
 }

@@ -1,6 +1,7 @@
 import type { ModCapabilities } from "@/mods/types";
 
 export const TUI_MOD_CAPABILITIES: ModCapabilities = {
+  context: { record: true },
   turn: { interrupt: true },
   session: { activate: true },
   tools: true,

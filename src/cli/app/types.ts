@@ -148,6 +148,8 @@ export type QueueApprovalResults = (
 ) => void;
 
 export type ProcessConversationOptions = {
+  /** Explicit native/queued human provenance; never inferred from role:user. */
+  humanOtid?: string;
   clientPreferences?: import("@/types/client-preferences").ClientPreferences;
   allowResponseStateReuse?: boolean;
   allowReentry?: boolean;

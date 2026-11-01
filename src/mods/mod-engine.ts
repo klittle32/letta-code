@@ -127,7 +127,6 @@ export type {
   ResolveLocalModSourcesOptions,
 } from "@/mods/mod-sources";
 export { resolveLocalModSources } from "@/mods/mod-sources";
-
 export const GLOBAL_MODS_DIRECTORY = getGlobalModsDirectory();
 export const LEGACY_GLOBAL_EXTENSIONS_DIRECTORY =
   getLegacyGlobalExtensionsDirectory();
@@ -137,7 +136,6 @@ const requireFromRuntime = createRequire(import.meta.url);
 let resolveRuntimePackageDirectory = getRuntimePackageDirectory;
 
 export type LettaModDisposer = () => void;
-
 export type ModCapabilityDiagnosticRecorder = (
   diagnostic: Pick<
     ModDiagnostic,
@@ -856,6 +854,7 @@ function createLettaModApi(
       owner,
       signal,
       capabilities.session?.activate ? onActivate : undefined,
+      capabilities.context?.record === true,
     );
   const isLive = () => isOwnerLive(registry, owner);
   const guardLive = (capability: ModDiagnostic["capability"]): boolean => {
@@ -1512,6 +1511,7 @@ export async function emitLocalModEvent<TName extends ModEventName>(
               registration.owner,
               signal,
               registry.onActivate,
+              registry.capabilities.context?.record === true,
             )
           : eventContext,
         registration,

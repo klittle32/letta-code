@@ -69,6 +69,9 @@ export interface ContextInbox {
    * not automatic release/replay. Repeat dispatch only with the same request IDs.
    */
   markDispatch(id: string): Promise<ContextSubmission>;
+  /** Host-only positive admission rejection proof. Preserve the exact immutable
+   * request/selection for a safe retry; never call for generic errors/abort. */
+  confirmNotAdmitted(id: string): Promise<ContextSubmission>;
   /** Acceptance means request acceptance, not successful turn completion.
    * Rejection must establish non-acceptance (or cancellation BEFORE dispatch).
    * A timeout, abort after dispatch, or failed turn is insufficient evidence.
@@ -194,6 +197,39 @@ function validateState(
       }
     }
   }
+}
+
+/** Read-only host classification metadata. Validate the entire atomic snapshot and
+ * its namespace filename; never return collaborator text or authorize delivery. */
+export async function readContextInboxMetadata(
+  directory: string,
+  filename: string,
+) {
+  if (!/^[a-f0-9]{64}\.json$/.test(filename))
+    throw new Error("Invalid inbox filename");
+  const value = JSON.parse(
+    await readFile(join(directory, filename), "utf8"),
+  ) as InboxState;
+  const scope = normalizeContextInboxScope(value.scope);
+  const key = createHash("sha256").update(JSON.stringify(scope)).digest("hex");
+  if (filename !== `${key}.json`)
+    throw new Error("Context inbox namespace mismatch");
+  validateState(value, scope);
+  const reserved = new Set(
+    value.submissions
+      .filter((s) => s.outcome === "accepted" || s.outcome === "uncertain")
+      .flatMap((s) => s.recordIds),
+  );
+  return {
+    scope,
+    contextOtids: value.submissions
+      .filter((s) => s.recordIds.length > 0)
+      .map((s) => s.contextMessageOtid),
+    submissionIds: value.submissions.map((s) => s.id),
+    hasPending: value.records.some(
+      (r) => r.visibility !== "human" && !reserved.has(r.id),
+    ),
+  };
 }
 
 /** Scoped immutable records in one atomic host-local snapshot. No inference,
@@ -381,6 +417,18 @@ export function createContextInbox(options: {
         const changed = submission.outcome !== "uncertain";
         submission.outcome = "uncertain";
         return { result: projection(state, submission), changed };
+      });
+    },
+    confirmNotAdmitted(rawId) {
+      const id = requireIdentity(rawId);
+      return access((state) => {
+        const submission = findSubmission(state, id);
+        if (submission.outcome !== "uncertain")
+          throw new Error(
+            "Only a dispatched request can be proven not admitted",
+          );
+        submission.outcome = "prepared";
+        return { result: projection(state, submission), changed: true };
       });
     },
     settleSubmission(rawId, outcome) {

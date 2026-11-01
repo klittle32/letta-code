@@ -1,5 +1,5 @@
 import type { Message } from "@letta-ai/letta-client/resources/agents/messages";
-import { getBackend } from "@/backend";
+import { type Backend, getBackend } from "@/backend";
 import {
   summarizeConversation,
   updateConversationDescription,
@@ -7,6 +7,7 @@ import {
 import { DEFAULT_SUMMARIZATION_MODEL } from "@/constants";
 import { experimentManager } from "@/experiments/manager";
 import { isDebugEnabled } from "@/utils/debug";
+import { getHostContextRecords } from "./host-context-records";
 
 const CONVERSATION_DESCRIPTION_MAX_WORDS = 40;
 const CONVERSATION_DESCRIPTION_MESSAGE_LIMIT = 40;
@@ -177,6 +178,24 @@ export async function generateConversationDescriptionFromSummary(
   }
 }
 
+/** Human-authored seed projection; assistant responses remain verbatim. */
+export async function listConversationDescriptionMessages(
+  backend: Pick<Backend, "listConversationMessages">,
+  conversationId: string,
+) {
+  const page = await backend.listConversationMessages(conversationId, {
+    limit: CONVERSATION_DESCRIPTION_MESSAGE_LIMIT,
+    order: "desc",
+    include_return_message_types: ["user_message", "assistant_message"],
+  });
+  return buildConversationDescriptionMessages(
+    await getHostContextRecords().projectMessages(
+      { conversationId },
+      paginatedItems(page as PaginatedItems<Message>).reverse(),
+    ),
+  );
+}
+
 export async function regenerateConversationDescription(
   conversationId: string | null | undefined,
 ): Promise<boolean> {
@@ -191,13 +210,9 @@ export async function regenerateConversationDescription(
   }
 
   try {
-    const page = await getBackend().listConversationMessages(conversationId, {
-      limit: CONVERSATION_DESCRIPTION_MESSAGE_LIMIT,
-      order: "desc",
-      include_return_message_types: ["user_message", "assistant_message"],
-    });
-    const messages = buildConversationDescriptionMessages(
-      paginatedItems(page as PaginatedItems<Message>).reverse(),
+    const messages = await listConversationDescriptionMessages(
+      getBackend(),
+      conversationId,
     );
     const description = await generateConversationDescriptionFromSummary(
       conversationId,

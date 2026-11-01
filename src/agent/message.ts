@@ -46,6 +46,10 @@ import {
   buildClientSkillsUpdateReminder,
 } from "./client-skills";
 import { getSkillSources } from "./context";
+import {
+  getMessageTransportOwner,
+  type MessageRecoveryTransport,
+} from "./message-transport-owner";
 import { parseRetryAfterHeaderMs } from "./turn-recovery-policy";
 
 const streamRequestStartTimes = new WeakMap<object, number>();
@@ -66,7 +70,7 @@ export type ConversationMessageTransport = Pick<
 // Backend identity and agent/default-conversation scope must not share a
 // notification baseline. Discovery cache invalidation must not clear it either.
 const sentClientSkillsByBackend = new WeakMap<
-  ConversationMessageTransport,
+  object,
   Map<string, NonNullable<ConversationMessageCreateParams["client_skills"]>>
 >();
 
@@ -110,6 +114,7 @@ export type StreamRequestContext = {
   actingUserId?: string;
   requestStartedAtMs: number;
   otid?: string;
+  recoveryTransport?: MessageRecoveryTransport;
 };
 const streamRequestContexts = new WeakMap<object, StreamRequestContext>();
 
@@ -460,10 +465,12 @@ export async function sendMessageStreamWithBackend(
     resolvedConversationId,
     conversationId === "default" ? opts.agentId : null,
   );
-  let sentClientSkills = sentClientSkillsByBackend.get(backend);
+  const transportOwner = getMessageTransportOwner(backend);
+  const cacheOwner = transportOwner?.cacheOwner ?? backend;
+  let sentClientSkills = sentClientSkillsByBackend.get(cacheOwner);
   if (!sentClientSkills) {
     sentClientSkills = new Map();
-    sentClientSkillsByBackend.set(backend, sentClientSkills);
+    sentClientSkillsByBackend.set(cacheOwner, sentClientSkills);
   }
   const skillReminder = buildClientSkillsUpdateReminder(
     sentClientSkills.get(skillScope),
@@ -705,8 +712,18 @@ export async function sendMessageStreamWithBackend(
     agentId: opts.agentId ?? null,
     ...(actingUserId ? { actingUserId } : {}),
     requestStartedAtMs,
+    recoveryTransport: transportOwner?.recovery,
     otid: firstOtid,
   });
 
   return stream;
+}
+
+/** Resumed streams keep recovery routing, but never gain original-stream acceptance evidence. */
+export function inheritStreamRequestContext(
+  source: object,
+  target: object,
+): void {
+  const context = streamRequestContexts.get(source);
+  if (context) streamRequestContexts.set(target, context);
 }

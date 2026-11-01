@@ -1,14 +1,4 @@
-import {
-  admitTuiApprovalPause,
-  buildRetiredApprovalResults,
-  getRecoveredApprovalContexts,
-  recoverTuiApprovalInput,
-} from "./tui-approval-recovery";
-import { observeTuiRunStream } from "./tui-run-stream";
-import { bindTuiTurnEvents, scheduleTuiContinuation } from "./tui-turn-events";
-import * as tuiTurns from "./tui-turn-owner";
 // src/cli/app/useConversationLoop.ts
-
 import { randomUUID } from "node:crypto";
 import { APIError } from "@letta-ai/letta-client/core/error";
 import type {
@@ -53,7 +43,7 @@ import {
   rotateChatGPTPlanOnQuotaLimit,
 } from "@/agent/chatgpt-plan-rotation";
 import { getResumeDataFromBackend } from "@/agent/check-approval";
-import { getStreamToolContextId, sendMessageStream } from "@/agent/message";
+import { getStreamToolContextId } from "@/agent/message";
 import { getModelInfoForLlmConfig } from "@/agent/model";
 import { INTERRUPT_RECOVERY_ALERT } from "@/agent/prompt-assets";
 import type { SessionStats } from "@/agent/stats";
@@ -111,6 +101,7 @@ import {
   isFileWriteTool,
   isPatchTool,
 } from "@/cli/helpers/tool-name-mapping";
+import { sendTuiMessageStream as sendMessageStream } from "@/cli/helpers/tui-context-stream";
 import { finishTuiTurn } from "@/cli/helpers/tui-turn-lifecycle";
 import type { LocalModAdapter } from "@/cli/mods/use-local-mod-adapter";
 import { runStopHooks } from "@/hooks";
@@ -144,6 +135,15 @@ import {
 import { sendDesktopNotification } from "./notifications";
 import { isRetriableError } from "./retry";
 import { getRestorableUserText } from "./system-reminders";
+import {
+  admitTuiApprovalPause,
+  buildRetiredApprovalResults,
+  getRecoveredApprovalContexts,
+  recoverTuiApprovalInput,
+} from "./tui-approval-recovery";
+import { observeTuiRunStream } from "./tui-run-stream";
+import { bindTuiTurnEvents, scheduleTuiContinuation } from "./tui-turn-events";
+import * as tuiTurns from "./tui-turn-owner";
 import { emitTuiTurnStart } from "./tui-turn-start";
 import { prepareTuiQueuedTurn } from "./turn-input";
 import type {
@@ -156,11 +156,9 @@ import type {
 } from "./types";
 
 type NetworkPhase = "error" | "upload" | "download" | null;
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
 function makeExecutionPhaseHook(
   setExecutionPhase: Dispatch<SetStateAction<ExecutionPhase>>,
 ) {
@@ -682,7 +680,7 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
               m.type === "message" && m.role === "user"
                 ? {
                     ...m,
-                    otid: randomUUID(),
+                    otid: m.otid === options?.humanOtid ? m.otid : randomUUID(),
                     content: [
                       { type: "text" as const, text: INTERRUPT_RECOVERY_ALERT },
                       ...(typeof m.content === "string"
@@ -729,6 +727,7 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
           clearCompletedSubagents();
         }
 
+        let humanOtid = options?.humanOtid;
         let streamSequenceCursor: StreamSequenceCursor | null = null;
 
         while (true) {
@@ -768,7 +767,6 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
             ];
           }
 
-          // Stream one turn; try-catch covers pre-stream throws (desync).
           let stream: Awaited<ReturnType<typeof sendMessageStream>> | null =
             null;
           let turnToolContextId: string | null = null;
@@ -783,6 +781,7 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
               conversationIdRef.current,
               currentInput,
               {
+                humanOtid,
                 agentId: agentIdRef.current,
                 overrideModel: tempModelOverrideRef.current ?? undefined,
                 preparedToolContext: preparedToolContext.preparedToolContext,
@@ -792,6 +791,7 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
               // Abort the initial POST with the turn so Esc is immediate.
               { maxRetries: 0, signal },
             );
+            humanOtid = undefined;
             stream = nextStream;
             turnToolContextId = getStreamToolContextId(nextStream);
           } catch (preStreamError) {
@@ -2167,7 +2167,7 @@ export function useConversationLoop(ctx: ConversationLoopContext) {
             return;
           }
 
-          // Unexpected stop reason (error, llm_api_error, etc.)
+          tuiTurns.assertTuiAutomaticRetry(abortControllerRef);
           // Cache desync detection and last failure for consistent handling
           // Check if payload contains approvals (could be approval-only or mixed with user message)
           const hasApprovalInPayload = currentInput.some(

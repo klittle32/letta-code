@@ -175,6 +175,9 @@ export function createTuiTurnControl(options: {
       backendStarted = true;
       runId = undefined;
     },
+    get observedRunId() {
+      return runId;
+    },
     observeRun(id: string | undefined) {
       runId = id;
     },

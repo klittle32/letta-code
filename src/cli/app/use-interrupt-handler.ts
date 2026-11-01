@@ -1,4 +1,7 @@
-import { getTuiTurnControl } from "./tui-turn-owner";
+import {
+  cancelTuiBackendConversation,
+  getTuiTurnControl,
+} from "./tui-turn-owner";
 // src/cli/app/useInterruptHandler.ts
 
 import {
@@ -14,7 +17,7 @@ import {
   interruptActiveSubagents,
   interruptStopFailedSubagents,
 } from "@/agent/subagent-state";
-import { getBackend } from "@/backend";
+
 import type { Buffers } from "@/cli/helpers/accumulator";
 import { markIncompleteToolsAsCancelled } from "@/cli/helpers/accumulator";
 import { formatErrorDetails } from "@/cli/helpers/error-formatter";
@@ -189,7 +192,10 @@ export function useInterruptHandler(ctx: InterruptHandlerContext) {
         if (!cancelConversationId || cancelConversationId === "loading") {
           return;
         }
-        return getBackend().cancelConversation(cancelConversationId);
+        return cancelTuiBackendConversation(
+          abortControllerRef,
+          cancelConversationId,
+        );
       })
       .catch(() => {
         appendError(
@@ -476,7 +482,10 @@ export function useInterruptHandler(ctx: InterruptHandlerContext) {
         if (!cancelConversationId || cancelConversationId === "loading") {
           return;
         }
-        await getBackend().cancelConversation(cancelConversationId);
+        await cancelTuiBackendConversation(
+          abortControllerRef,
+          cancelConversationId,
+        );
 
         if (abortControllerRef.current) {
           abortControllerRef.current.abort();

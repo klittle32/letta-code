@@ -99,6 +99,8 @@ export interface ModEventCapabilities {
 }
 
 export interface ModCapabilities {
+  /** Host-local passive context; omitted means unsupported. */
+  context?: { record: boolean };
   session?: { activate: boolean };
   /** Exact-turn request receipts; omitted means unsupported. */
   turn?: { interrupt: boolean };
@@ -168,6 +170,7 @@ export interface ModConversationCreateOptions {
 }
 
 export interface ModConversationHandle {
+  context?: import("./context-records-api").ModContextRecords;
   id: string | null;
   /**
    * Create an inactive conversation for this agent, without sending or copying

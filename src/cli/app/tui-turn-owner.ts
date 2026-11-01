@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { MessageCreate } from "@letta-ai/letta-client/resources/agents/agents";
 import type { ApprovalCreate } from "@letta-ai/letta-client/resources/agents/messages";
+import {
+  assertTurnReplayAllowed,
+  getTurnMessageTransport,
+} from "@/agent/message-transport-owner";
 import { getBackend } from "@/backend";
 import { createHostTurnHandle } from "@/mods/turn-handle";
 import type { ModContext } from "@/mods/types";
@@ -81,15 +85,17 @@ export function enterTuiLogicalTurn(options: {
       owners.get(options.ref)?.control === control &&
       options.generationRef.current === options.generation,
     cancelRun: async (runId) => {
+      const capturedBackend =
+        getTurnMessageTransport(control.signal) ?? backend;
       let cancelError: unknown;
       try {
-        await backend.cancelRun(options.agentId, runId);
+        await capturedBackend.cancelRun(options.agentId, runId);
       } catch (error) {
         // An already-terminal run may reject cancellation. Exact recorded
         // evidence can still establish that no active run remains to cancel.
         cancelError = error;
       }
-      const run = await backend.retrieveRun(runId);
+      const run = await capturedBackend.retrieveRun(runId);
       if (run.id !== runId || run.agent_id !== options.agentId)
         throw new Error("Backend returned a different run or agent");
       if (
@@ -142,4 +148,30 @@ export function isTuiApprovalContinuation(
         item.type !== "approval" && "role" in item && item.role === "user",
     )
   );
+}
+
+/** Legacy conversation cancellation must never retarget a principal-bound send. */
+export async function cancelTuiBackendConversation(
+  ref: ControllerRef,
+  target: string,
+): Promise<void> {
+  const control = owners.get(ref)?.control;
+  const captured = control
+    ? getTurnMessageTransport(control.signal)
+    : undefined;
+  if (!captured) {
+    await getBackend().cancelConversation(target);
+    return;
+  }
+  const runId = control?.observedRunId;
+  if (!runId || !control?.turn.agentId)
+    throw new Error(
+      "Captured turn has no proven run identity; conversation-wide cancellation is unavailable",
+    );
+  await captured.cancelRun(control.turn.agentId, runId);
+}
+
+export function assertTuiAutomaticRetry(ref: ControllerRef): void {
+  const control = owners.get(ref)?.control;
+  if (control) assertTurnReplayAllowed(control.signal);
 }

@@ -67,6 +67,11 @@ describe("native TUI turn input", () => {
       expect(turn.options.clientPreferences).toEqual(
         item.kind === "user" && item.source !== "cron" ? {} : undefined,
       );
+      expect(turn.options.humanOtid).toBe(
+        item.kind === "user" && item.source !== "cron"
+          ? (turn.input[1]?.otid ?? undefined)
+          : undefined,
+      );
       expect(turn.input[0]).toMatchObject({ type: "approval", approvals });
       expect(turn.input[1]).toMatchObject({ type: "message", role: "user" });
       const optimistic = buffers.order.map((id) => buffers.byId.get(id));

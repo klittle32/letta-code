@@ -1,6 +1,7 @@
 import type { ModCapabilities } from "@/mods/types";
 
 export const MOD_CAPABILITY_IDS = [
+  "context.record",
   "turn.interrupt",
   "session.activate",
   "tools",
@@ -92,6 +93,9 @@ export function cloneModCapabilities(
   capabilities: ModCapabilities,
 ): ModCapabilities {
   return {
+    ...(capabilities.context
+      ? { context: { record: capabilities.context.record === true } }
+      : {}),
     turn: { interrupt: capabilities.turn?.interrupt === true },
     session: { activate: capabilities.session?.activate === true },
     tools: capabilities.tools,

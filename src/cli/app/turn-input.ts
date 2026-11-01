@@ -61,6 +61,7 @@ export function prepareTuiQueuedTurn(
       approvals,
     }),
     options: {
+      humanOtid: tuiQueuedClientPreferences(items) ? otid : undefined,
       allowReentry: true,
       clientPreferences: tuiQueuedClientPreferences(items),
     },

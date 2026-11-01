@@ -3663,8 +3663,7 @@ ${SYSTEM_REMINDER_CLOSE}
         ? Math.max(0, toLines(buffersRef.current).length - 1)
         : null;
 
-      // Check for pending approvals before sending message (skip if we already have
-      // a queued approval response to send first).
+      // Check pending approvals unless a queued response already comes first.
       // Only do eager check when resuming a session (LET-7101) - otherwise lazy recovery handles it
       let eagerRecoveryDenials: ApprovalResult[] | null = null;
       if (needsEagerApprovalCheck && !queuedApprovalResults) {
@@ -3715,6 +3714,7 @@ ${SYSTEM_REMINDER_CLOSE}
       });
 
       await processConversation(initialInput, {
+        humanOtid: clientPreferences ? userOtid : undefined,
         clientPreferences,
         submissionGeneration,
         transcriptStartLineIndex,

@@ -1,4 +1,5 @@
 import type { Message } from "@letta-ai/letta-client/resources/agents/messages";
+import { getHostContextRecords } from "@/agent/host-context-records";
 import type { Backend, ConversationMessageListBody } from "@/backend";
 import { summarizeConversation } from "@/backend/api/conversations";
 import { DEFAULT_TITLE_SUMMARIZATION_MODEL } from "@/constants";
@@ -171,7 +172,10 @@ export async function listConversationTitleMessages(
   } as ConversationMessageListBody);
 
   return buildConversationTitleMessages(
-    paginatedItems(page as PaginatedItems<Message>).reverse(),
+    await getHostContextRecords().projectMessages(
+      { conversationId },
+      paginatedItems(page as PaginatedItems<Message>).reverse(),
+    ),
   );
 }
 
