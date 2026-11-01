@@ -591,3 +591,91 @@ test.each(["before", "after"])(
     );
   },
 );
+
+test("human content needs exact authorization: captured offline reads work, cold outage and account change fail closed", async () => {
+  const f = await api();
+  await f.host.context(scope).record({
+    id: "human",
+    text: "original-principal-visible",
+    visibility: "human",
+  });
+  const rows = await f.host.humanSnapshot(scope);
+  expect(rows).toHaveLength(1);
+  const id = rows[0]?.id;
+  if (!id) throw new Error("Missing namespace ID");
+  f.metadataStatus(502);
+  expect(await f.host.humanSnapshot(scope)).toEqual(rows);
+  await expect(
+    createPassiveContextHost(f.options).humanSnapshot(scope),
+  ).rejects.toThrow();
+  f.token("rotated");
+  f.org("other-org");
+  f.metadataStatus(200);
+  await expect(f.host.assertHumanCurrent(scope, id)).rejects.toThrow();
+  expect(await f.host.humanSnapshot(scope)).toEqual([]);
+});
+
+test("principal change during asynchronous human snapshot cannot return previous-principal content", async () => {
+  const f = await api();
+  let release: (() => void) | undefined;
+  let entered: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const host = createPassiveContextHost({
+    ...f.options,
+    capture: async (options) => {
+      const source = await f.options.capture(options);
+      return {
+        ...source,
+        inbox: {
+          ...source.inbox,
+          async humanEntries() {
+            const entries = await source.inbox.humanEntries();
+            entered?.();
+            await hold;
+            return entries;
+          },
+        },
+      };
+    },
+  });
+  await host.context(scope).record({
+    id: "only-original",
+    text: "PRIVATE_ORIGINAL",
+    visibility: "human",
+  });
+  const snapshot = host.humanSnapshot(scope);
+  await started;
+  f.token("new-token");
+  f.org("new-org");
+  release?.();
+  await expect(snapshot).rejects.toThrow("session changed");
+  expect(await host.humanSnapshot(scope)).toEqual([]);
+});
+
+test("human validation recaptures same-organization token rotation but rejects a new principal", async () => {
+  const f = await api();
+  const original = f.host.context(scope);
+  await original.record({
+    id: "visible",
+    text: "original",
+    visibility: "human",
+  });
+  const rows = await f.host.humanSnapshot(scope);
+  const id = rows[0]?.id;
+  if (!id) throw new Error("Missing context identity");
+  f.token("same-org-rotated");
+  await f.host.assertHumanCurrent(scope, id);
+  expect(await f.host.humanSnapshot(scope)).toEqual(rows);
+  f.token("new-org-token");
+  f.org("org-two");
+  await expect(f.host.assertHumanCurrent(scope, id)).rejects.toThrow(
+    "principal changed",
+  );
+  expect(await f.host.humanSnapshot(scope)).toEqual([]);
+  expect(await original.list()).toHaveLength(1);
+});

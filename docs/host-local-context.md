@@ -16,10 +16,58 @@ await context.reconcile("original-human-otid");
 `record` persists an immutable, idempotent host-local record without inference.
 Reusing an ID with different text/visibility fails. `list` inspects host
 records; it does not manufacture server `Message` rows and is separate from
-`getHistory`. Only `model` visibility is supported. `human` and `both` fail
-explicitly because durable human-visible context insertion is unsupported. This
-API is therefore a passive model-context slice, not complete human/model
-transcript parity.
+`getHistory`. The TUI supports all three visibility values:
+
+- `model`: the existing next-explicit-human model delivery, without a local human row.
+- `human`: durable, labelled host-local collaborator context in the human transcript;
+  never selected for model delivery.
+- `both`: one local human row plus the existing frozen model delivery. Acceptance,
+  uncertainty, retries and reconciliation do not duplicate the displayed row.
+
+Human rows are not authored user messages or server history. Recording, rendering,
+repainting and resume do not submit input or start inference. These rows stay outside
+model/reflection buffers and title/description seeds. Assistant responses remain
+unchanged even when they quote collaborator context.
+
+A private placement commits atomically with the immutable record. Retrying an ID
+preserves its original placement. Namespace-qualified row IDs and stable backend
+message IDs/OTIDs and stable tool-call aliases determine positioning; `sequence` orders records at the same
+boundary. Positioning is at whole-message boundaries, including an active message
+when its stable identity is known, not at exact streamed fragments. Otherwise the
+latest identifiable boundary (including the human OTID) is used. Without an active
+UI boundary the captured transport reads one bounded page of canonical history
+(up to 100 rows), skipping raw rows without a transcript counterpart, such as tool
+returns. Stable tool-call IDs resolve live/resume aliases and parallel calls.
+A genuinely empty history anchors at conversation start. A clipped, missing or legacy anchor is
+labelled **boundary unavailable** before the loaded message tail; it is never
+silently relocated to the tail's end. The stored anchor does not change when more
+history or message aliases become available.
+
+One active in-process TUI subscription installs before snapshot loading and receives
+content-free invalidations after commit. Generation/workspace/backend changes fence
+old asynchronous work; disposal removes the observer. Render-time API ownership
+checks use an opaque memory-only configuration identity, with no client refresh,
+auth lookup or filesystem work. Full captured-session/directory checks run before
+installing a snapshot, on activation and on record invalidation. Same-owner reloads
+retain the validated projection; unchanged/idempotent records cause no repaint.
+A detected owner change hides old text immediately; a failed read replaces it with
+the unavailable notice. Same-organization credential rotation recaptures and
+revalidates the namespace; another organization never inherits the prior text.
+There is no background monitoring of external credential/store mutation. The
+credential owner's existing cache/reload behavior determines when external auth
+changes become visible; directory fences still run for each newly loaded snapshot.
+Explicit `/cd` retains the conversation's durable history: records gain no new workspace namespace. There is
+no filesystem poller or cross-process live synchronization; another process's writes
+appear on reactivation/restart. Ordinary conversations without human context perform
+no additional principal capture for display.
+
+Human text is loaded only from the exact currently authorized inbox. The cross-
+namespace OTID classifier is not authority to expose text. Captured, still-current
+sessions can read locally during metadata outages. Cold metadata failure displays a
+context-unavailable notice while preserving the ordinary history/approval path.
+Authorization failures remove projected text; changed principals/stores never inherit
+records. Rendering strips terminal/OSC/control and selected bidi formatting characters at the
+display boundary, retaining original stored bytes and literal markup.
 
 Only native explicit human submissions, including human input queued after a
 tool turn, select pending records. Notifications, cron, approvals, tool
@@ -76,7 +124,9 @@ Corrupt or unreadable snapshots fail closed. A bad namespace in the current
 conversation can block human sends and make projected resume history unavailable;
 pending approvals still have the separate retrieval fallback. Title/description
 classification without an agent ID scans inbox directories, so an unrelated bad
-snapshot can also force default titles/descriptions. There is no automatic repair
+snapshot can also force default titles/descriptions. Human projection displays an
+unavailable notice on invalid snapshots rather than falling back to raw content.
+There is no automatic repair
 or retention policy for these files.
 
 Record only consented collaborator content. Never put credentials, protected
@@ -85,8 +135,30 @@ human-accessible local data, not permission to export protected host context.
 
 Deterministic Linux/Bun tests exercise a rendered TUI, real mod command loading,
 queue composition and an isolated local backend, plus original-stream acceptance
-fixtures and original-scope history reconciliation. Rebuilt Node native checks
-include the retained resume case and a continuous fresh-conversation walkthrough:
+fixtures and original-scope history reconciliation. Human/both tests additionally
+cover idle/in-tool/in-stream visibility, durable resume, whole-message aliases,
+missing boundaries, scope/activation/disposal races and terminal-safe literal
+rendering. Parent verification passed 606 tests across 79 isolated suites, all
+13 static gates, and the rebuilt Node target. Independent re-review found no
+blockers, including render-cost, identity rotation and tool-anchor corrections.
+
+A continuous 59-second Linux desktop walkthrough exercised the rebuilt Node TUI
+with a real scoped test mod and isolated deterministic local executor. It began
+with no records or messages. Recording one note of each visibility produced three
+local records and zero server rows; only human/both notes appeared. An automated
+mod send produced two server rows without binding any context. Explicit human
+input produced five rows total, with one accepted canonical context row containing
+the model/both notes and no human-only marker. A later human-only note appeared
+after the completed response without changing server history. Idempotent retries
+and process restart preserved four records, five server rows and one accepted
+binding. Dark live and light resumed projections were visually inspected, with
+the three visible notes at their original whole-message boundaries and no
+model-only bubble. Checkpoint assertions agreed with those counts. This is not
+native proof of mid-stream/tool timing or live credential rotation; those paths
+remain deterministic test evidence.
+
+Prior model-only rebuilt Node native checks include the retained resume case and
+a continuous fresh-conversation walkthrough:
 recording alone leaves zero server rows; an automated mod send creates two rows
 without consuming the record; human input adds exactly one context row, one human
 row and one assistant row. Reconciliation confirms acceptance without adding rows,

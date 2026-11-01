@@ -268,6 +268,16 @@ test("title and description seeds exclude host context while preserving real hum
       text: "BLUE-42",
       visibility: "model",
     });
+    await context.record({
+      id: "human-private",
+      text: "HUMAN_ONLY_TEXT",
+      visibility: "human",
+    });
+    await context.record({
+      id: "both-record",
+      text: "BOTH_CONTEXT_TEXT",
+      visibility: "both",
+    });
     const transport = await host.transport(f.scope, "human-seed");
     for await (const _ of await transport.createConversationMessageStream(
       f.scope.conversationId,
@@ -291,6 +301,24 @@ test("title and description seeds exclude host context while preserving real hum
       })
     ).getPaginatedItems();
     expect(JSON.stringify(raw)).toContain("BLUE-42");
+    expect(JSON.stringify(raw)).not.toContain("HUMAN_ONLY_TEXT");
+    const { getResumeDataFromBackend } = await import("./check-approval");
+    const resumed = await getResumeDataFromBackend(
+      await f.backend.retrieveAgent(f.scope.agentId),
+      f.scope.conversationId,
+    );
+    const { backfillBuffers } = await import("@/cli/helpers/backfill");
+    const { linesToTranscript, toLines } = await import(
+      "@/cli/helpers/accumulator"
+    );
+    const buffers = createBuffers(f.scope.agentId);
+    backfillBuffers(buffers, resumed.messageHistory);
+    expect(linesToTranscript(toLines(buffers))).not.toContain(
+      "HUMAN_ONLY_TEXT",
+    );
+    expect(linesToTranscript(toLines(buffers))).not.toContain(
+      "BOTH_CONTEXT_TEXT",
+    );
     const title = await listConversationTitleMessages(
       f.backend,
       f.scope.conversationId,
@@ -300,6 +328,8 @@ test("title and description seeds exclude host context while preserving real hum
       f.scope.conversationId,
     );
     for (const seed of [title, description]) {
+      expect(JSON.stringify(seed)).not.toContain("HUMAN_ONLY_TEXT");
+      expect(JSON.stringify(seed)).not.toContain("BOTH_CONTEXT_TEXT");
       expect(seed[0]).toEqual({ role: "user", content: "Fix the build" });
       expect(seed.some((row) => row.role === "assistant")).toBe(true);
       expect(seed.filter((row) => row.role === "user")).toEqual([

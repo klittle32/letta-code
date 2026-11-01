@@ -280,3 +280,33 @@ test("binding persists a unique UUID and exact request fingerprint, failing clos
     expect(await readFile(path, "utf8")).toBe(JSON.stringify(state));
   }
 });
+
+test("human placement commits with record and stays immutable across retry/restart", async () => {
+  const input = {
+    id: "human-context",
+    text: "visible",
+    visibility: "both" as const,
+  };
+  await open().record(input, {
+    after: { otid: "human-1", messageId: "message-1" },
+  });
+  await open().record(input, { after: { otid: "later" } });
+  expect(await open().humanEntries()).toEqual([
+    {
+      record: expect.objectContaining(input),
+      placement: { after: { otid: "human-1", messageId: "message-1" } },
+    },
+  ]);
+  await expect(
+    open().record({ ...input, text: "changed" }, { after: null }),
+  ).rejects.toThrow("conflict");
+  expect(await open().humanEntries()).toHaveLength(1);
+  expect(
+    (await open().bindExplicitSubmission("human-2")).records.map((r) => r.id),
+  ).toEqual([input.id]);
+  await open().record(
+    { id: "only-human", text: "never model", visibility: "human" },
+    { after: null },
+  );
+  expect((await open().bindExplicitSubmission("human-3")).records).toEqual([]);
+});

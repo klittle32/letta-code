@@ -22,6 +22,13 @@ export interface ContextInboxRecord extends ContextInboxInput {
   storage: "host-local";
   sequence: number;
 }
+export type ContextPlacement = {
+  after: { otid?: string; messageId?: string; toolCallId?: string } | null;
+};
+export type HumanContextEntry = {
+  record: ContextInboxRecord;
+  placement: ContextPlacement | null;
+};
 export type ContextSubmissionOutcome =
   | "prepared"
   | "uncertain"
@@ -45,9 +52,14 @@ interface InboxState {
   scope: ContextInboxScope;
   records: ContextInboxRecord[];
   submissions: StoredSubmission[];
+  placements?: { id: string; placement: ContextPlacement }[];
 }
 export interface ContextInbox {
-  record(input: ContextInboxInput): Promise<ContextInboxRecord>;
+  record(
+    input: ContextInboxInput,
+    placement?: ContextPlacement,
+  ): Promise<ContextInboxRecord>;
+  humanEntries(): Promise<HumanContextEntry[]>;
   /** All host records for this audience, including already accepted records.
    * Delivery selection belongs exclusively to bindExplicitSubmission.
    */
@@ -128,6 +140,21 @@ function validId(value: unknown): value is string {
   );
 }
 
+function validPlacement(value: unknown): value is ContextPlacement {
+  if (!value || typeof value !== "object" || !("after" in value)) return false;
+  const after = value.after;
+  return (
+    after === null ||
+    (typeof after === "object" &&
+      (("otid" in after && validId(after.otid)) ||
+        ("messageId" in after && validId(after.messageId)) ||
+        ("toolCallId" in after && validId(after.toolCallId))) &&
+      (!("otid" in after) || validId(after.otid)) &&
+      (!("messageId" in after) || validId(after.messageId)) &&
+      (!("toolCallId" in after) || validId(after.toolCallId)))
+  );
+}
+
 function validateState(
   value: unknown,
   scope: ContextInboxScope,
@@ -156,6 +183,22 @@ function validateState(
     )
       return fail();
     ids.add(record.id);
+  }
+  if (state.placements !== undefined) {
+    if (!Array.isArray(state.placements)) return fail();
+    const placed = new Set<string>();
+    for (const item of state.placements) {
+      if (
+        !item ||
+        !ids.has(item.id) ||
+        placed.has(item.id) ||
+        !validPlacement(item.placement)
+      )
+        return fail();
+      if (state.records.find((r) => r.id === item.id)?.visibility === "model")
+        return fail();
+      placed.add(item.id);
+    }
   }
   const submissions = new Set<string>();
   const reserved = new Set<string>();
@@ -226,6 +269,7 @@ export async function readContextInboxMetadata(
       .filter((s) => s.recordIds.length > 0)
       .map((s) => s.contextMessageOtid),
     submissionIds: value.submissions.map((s) => s.id),
+    hasHuman: value.records.some((r) => r.visibility !== "model"),
     hasPending: value.records.some(
       (r) => r.visibility !== "human" && !reserved.has(r.id),
     ),
@@ -310,7 +354,11 @@ export function createContextInbox(options: {
     return submission;
   }
   return {
-    record(input) {
+    record(input, placement) {
+      if (placement !== undefined && !validPlacement(placement))
+        throw new Error("Invalid context placement");
+      const capturedPlacement =
+        placement === undefined ? undefined : structuredClone(placement);
       const id = requireIdentity(input.id);
       if (
         id !== input.id ||
@@ -336,8 +384,24 @@ export function createContextInbox(options: {
           sequence: state.records.length + 1,
         };
         state.records.push(record);
+        if (record.visibility !== "model" && capturedPlacement !== undefined) {
+          state.placements ??= [];
+          state.placements.push({ id, placement: capturedPlacement });
+        }
         return { result: record, changed: true };
       });
+    },
+    humanEntries() {
+      return access((state) => ({
+        result: state.records
+          .filter((r) => r.visibility !== "model")
+          .map((record) => ({
+            record,
+            placement:
+              state.placements?.find((p) => p.id === record.id)?.placement ??
+              null,
+          })),
+      }));
     },
     list(audience) {
       if (

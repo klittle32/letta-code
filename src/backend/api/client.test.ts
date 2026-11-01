@@ -50,3 +50,28 @@ describe("getLettaCodeHeaders", () => {
     );
   });
 });
+
+test("configuration identity is opaque, stable and detects memory-only credential changes without client work", async () => {
+  const { getClientConfigurationIdentity, __testOverrideGetClient } =
+    await import("./client");
+  const saved = process.env.LETTA_API_KEY;
+  let calls = 0;
+  __testOverrideGetClient(async () => {
+    calls++;
+    throw new Error("must not read auth");
+  });
+  try {
+    process.env.LETTA_API_KEY = "fixture-old";
+    const first = getClientConfigurationIdentity();
+    for (let i = 0; i < 20; i++)
+      expect(getClientConfigurationIdentity()).toBe(first);
+    process.env.LETTA_API_KEY = "fixture-new";
+    expect(getClientConfigurationIdentity()).not.toBe(first);
+    expect(Object.keys(getClientConfigurationIdentity())).toEqual([]);
+    expect(calls).toBe(0);
+  } finally {
+    __testOverrideGetClient(null);
+    if (saved === undefined) delete process.env.LETTA_API_KEY;
+    else process.env.LETTA_API_KEY = saved;
+  }
+});

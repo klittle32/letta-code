@@ -9,6 +9,7 @@ import { refreshAccessTokenSingleFlight } from "@/auth/oauth-refresh";
 import {
   bindOrgCredentials,
   getOrgAccessToken,
+  peekOrgAccessToken,
 } from "@/auth/org-credentials-session";
 import { type Settings, settingsManager } from "@/settings-manager";
 import { trackBoundaryError } from "@/telemetry/error-reporting";
@@ -36,6 +37,46 @@ export function __testOverrideGetClient(
   factory: (() => Promise<unknown>) | null,
 ): void {
   _testClientOverride = factory;
+}
+
+let configurationValues: unknown[] = [];
+let configurationIdentity: object = {};
+/** Opaque, memory-only change detector. Never authenticates, reads the keychain,
+ * refreshes tokens or authorizes content. Full capture still guards new reads. */
+export function getClientConfigurationIdentity(): object {
+  let settings: Settings | undefined;
+  try {
+    settings = settingsManager.getSettings();
+  } catch {
+    /* Not initialized. */
+  }
+  const tokens = settingsManager.getCachedSecureTokens();
+  let desktop: string | undefined;
+  try {
+    desktop = getDesktopAccessToken();
+  } catch {
+    desktop = "unavailable";
+  }
+  const values = [
+    _testClientOverride,
+    peekOrgAccessToken(),
+    desktop,
+    process.env.LETTA_API_KEY,
+    process.env.LETTA_BASE_URL,
+    process.env.LETTA_PROJECT,
+    process.env.LETTA_PROJECT_ID,
+    tokens.apiKey,
+    tokens.refreshToken,
+    _cachedApiKey,
+    settings?.env?.LETTA_API_KEY,
+    settings?.env?.LETTA_BASE_URL,
+    settings?.refreshToken,
+  ];
+  if (values.some((value, index) => value !== configurationValues[index])) {
+    configurationValues = values;
+    configurationIdentity = {};
+  }
+  return configurationIdentity;
 }
 
 function safeDiagnosticString(value: unknown): string {

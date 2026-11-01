@@ -44,12 +44,10 @@ test("record is immutable, passive, durable and separate from message history", 
   await expect(
     context.record({ id: "remote", text: "changed", visibility: "model" }),
   ).rejects.toThrow();
-  await expect(
-    context.record({ id: "thought", text: "private", visibility: "human" }),
-  ).rejects.toThrow("visibility");
+  await context.record({ id: "thought", text: "private", visibility: "human" });
   expect(
     await createPassiveContextHost(f.options).context(f.scope).list(),
-  ).toHaveLength(1);
+  ).toHaveLength(2);
 });
 test("ordinary input does not capture a session or look up metadata", async () => {
   const f = await fixture();
@@ -302,4 +300,162 @@ test("model-only projection uses durable source identity across restart and leav
   backfillBuffers(buffers, projected);
   expect(JSON.stringify(toLines(buffers))).not.toContain("BLUE-42");
   expect(JSON.stringify(toLines(buffers))).toContain("human-authored text");
+});
+
+test("human and both records persist exact display placements without inference or automatic binding", async () => {
+  const f = await fixture();
+  let invalidations = 0;
+  const dispose = f.host.subscribeHuman(
+    f.scope,
+    () => ({ after: { otid: "stable-human" } }),
+    () => invalidations++,
+  );
+  const context = f.host.context(f.scope);
+  await context.record({
+    id: "human",
+    text: "human-only",
+    visibility: "human",
+  });
+  const first = await f.host.humanSnapshot(f.scope);
+  expect(first).toHaveLength(1);
+  expect(first[0]?.placement).toEqual({ after: { otid: "stable-human" } });
+  await context.record({ id: "both", text: "shared", visibility: "both" });
+  await context.record({ id: "both", text: "shared", visibility: "both" });
+  const rows = await f.host.humanSnapshot(f.scope);
+  expect(rows).toHaveLength(2);
+  expect(rows[1]?.placement).toEqual({ after: { otid: "stable-human" } });
+  expect(invalidations).toBe(3);
+  expect(await context.submissions()).toEqual([]);
+  expect(
+    await f.backend.latestConversationRun(f.scope.conversationId),
+  ).toBeNull();
+  const restart = createPassiveContextHost(f.options);
+  expect(await restart.humanSnapshot(f.scope)).toEqual(rows);
+  const transport = await f.host.transport(f.scope, "explicit-human");
+  for await (const _ of await transport.createConversationMessageStream(
+    f.scope.conversationId,
+    {
+      messages: [{ role: "user", content: "hello", otid: "explicit-human" }],
+      streaming: true,
+    },
+  )) {
+  }
+  expect((await context.submissions())[0]?.records.map((r) => r.id)).toEqual([
+    "both",
+  ]);
+  expect(await restart.humanSnapshot(f.scope)).toEqual(rows);
+  dispose();
+});
+
+test("human snapshot never projects original-store content into a replacement store", async () => {
+  const f = await fixture();
+  let backend = f.backend;
+  const host = createPassiveContextHost({
+    ...f.options,
+    getBackend: () => backend,
+  });
+  const original = host.context(f.scope);
+  await original.record({
+    id: "private",
+    text: "original-store-only",
+    visibility: "human",
+  });
+  const before = await host.humanSnapshot(f.scope);
+  expect(before).toHaveLength(1);
+  const other = await fixture();
+  backend = other.backend;
+  expect(await host.humanSnapshot(f.scope)).toEqual([]);
+  expect(await original.list()).toHaveLength(1);
+  await expect(
+    original.record({ id: "later", text: "no", visibility: "both" }),
+  ).rejects.toThrow();
+});
+
+test("a clipped page without a stable boundary does not fabricate conversation start", async () => {
+  const f = await fixture();
+  f.backend.listConversationMessages = async () =>
+    ({
+      getPaginatedItems: () =>
+        Array.from({ length: 100 }, () => ({
+          message_type: "assistant_message",
+        })),
+    }) as unknown as Awaited<
+      ReturnType<typeof f.backend.listConversationMessages>
+    >;
+  await f.host
+    .context(f.scope)
+    .record({ id: "clipped", text: "local", visibility: "human" });
+  expect((await f.host.humanSnapshot(f.scope))[0]?.placement).toBeNull();
+});
+
+test("first human record uses the active stable boundary without a history lookup", async () => {
+  const f = await fixture();
+  const dispose = f.host.subscribeHuman(
+    f.scope,
+    () => ({ after: { otid: "active-human" } }),
+    () => {},
+  );
+  f.backend.listConversationMessages = async () => {
+    throw new Error("unnecessary history lookup");
+  };
+  try {
+    await f.host
+      .context(f.scope)
+      .record({ id: "first", text: "local", visibility: "human" });
+    expect((await f.host.humanSnapshot(f.scope))[0]?.placement).toEqual({
+      after: { otid: "active-human" },
+    });
+  } finally {
+    dispose();
+  }
+});
+
+test("history placement skips raw tool returns for a resolvable whole-message boundary", async () => {
+  const f = await fixture();
+  f.backend.listConversationMessages = async () =>
+    ({
+      getPaginatedItems: () => [
+        {
+          id: "return",
+          message_type: "tool_return_message",
+          tool_call_id: "tool",
+        },
+        {
+          id: "call",
+          otid: "call-otid",
+          message_type: "tool_call_message",
+          tool_call: { tool_call_id: "tool", name: "Shell", arguments: "{}" },
+        },
+        {
+          id: "user",
+          message_type: "user_message",
+          otid: "human",
+          content: "hello",
+        },
+      ],
+    }) as unknown as Awaited<
+      ReturnType<typeof f.backend.listConversationMessages>
+    >;
+  await f.host
+    .context(f.scope)
+    .record({ id: "visible", text: "local", visibility: "human" });
+  const rows = await f.host.humanSnapshot(f.scope);
+  const contextId = rows[0]?.id;
+  if (!contextId) throw new Error("Missing context row");
+  expect(rows[0]?.placement).toEqual({
+    after: { messageId: "call", otid: "call-otid", toolCallId: "tool" },
+  });
+  const { mergeContextTranscript } = await import(
+    "@/cli/helpers/context-transcript"
+  );
+  const { createBuffers, toLines } = await import("@/cli/helpers/accumulator");
+  const { backfillBuffers } = await import("@/cli/helpers/backfill");
+  const buffers = createBuffers(f.scope.agentId);
+  const history = await f.backend.listConversationMessages(
+    f.scope.conversationId,
+  );
+  backfillBuffers(buffers, history.getPaginatedItems().reverse());
+  expect(
+    mergeContextTranscript(toLines(buffers), rows).map((row) => row.id),
+  ).toEqual(["human", "call-otid", contextId]);
 });

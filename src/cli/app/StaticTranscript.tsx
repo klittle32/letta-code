@@ -4,6 +4,7 @@ import { ApprovalPreview } from "@/cli/components/ApprovalPreview";
 import { AssistantMessage } from "@/cli/components/AssistantMessageRich";
 import { BashCommandMessage } from "@/cli/components/BashCommandMessage";
 import { CommandMessage } from "@/cli/components/CommandMessage";
+import { ContextMessage } from "@/cli/components/ContextMessage";
 import { ErrorMessage } from "@/cli/components/ErrorMessageRich";
 import { EventMessage } from "@/cli/components/EventMessage";
 import { ReasoningMessage } from "@/cli/components/ReasoningMessageRich";
@@ -104,6 +105,8 @@ export function StaticTranscript({
             <Box key={item.id} marginTop={index > 0 ? 1 : 0}>
               {item.kind === "welcome" ? (
                 <WelcomeScreen loadingState="ready" {...item.snapshot} />
+              ) : item.kind === "context" ? (
+                <ContextMessage line={item} />
               ) : item.kind === "user" ? (
                 <UserMessage
                   line={item}

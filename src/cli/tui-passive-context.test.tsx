@@ -62,6 +62,9 @@ test.each([
   "transient",
   "approval-conflict",
   "esc",
+  "human-visible",
+  "both-visible",
+  "stream-visible",
 ] as const)(
   "rendered TUI passive record and queued %s after real mod tool",
   async (queuedKind) => {
@@ -81,6 +84,7 @@ test.each([
       __passiveRecords?: ModContextRecords;
       __passiveRecorded?: boolean;
       __passiveEnded?: boolean;
+      __passiveHold?: () => Promise<void>;
       __passiveEnqueue?: () => void;
     };
     let app: ReturnType<typeof render> | undefined;
@@ -95,12 +99,43 @@ test.each([
       const store = join(root, "state");
       mkdirSync(store);
       let executions = 0;
+      let releaseStreaming: (() => void) | undefined;
+      const streamingGate = new Promise<void>((resolve) => {
+        releaseStreaming = resolve;
+      });
       const backend = new LocalBackend({
         storageDir: join(root, "provider"),
         stateStorageDir: store,
         memfsEnabled: false,
         executor: {
           async execute() {
+            if (queuedKind === "stream-visible") {
+              if (++executions > 1) return createAssistantMessageStream();
+              return {
+                controller: new AbortController(),
+                async *[Symbol.asyncIterator]() {
+                  yield {
+                    message_type: "assistant_message",
+                    id: "assistant-stream",
+                    otid: "assistant-stream-otid",
+                    date: new Date().toISOString(),
+                    content: [{ type: "text", text: "Partial assistant\n\n" }],
+                  };
+                  await streamingGate;
+                  yield {
+                    message_type: "assistant_message",
+                    id: "assistant-stream",
+                    otid: "assistant-stream-otid",
+                    date: new Date().toISOString(),
+                    content: [{ type: "text", text: " completed" }],
+                  };
+                  yield {
+                    message_type: "stop_reason",
+                    stop_reason: "end_turn",
+                  };
+                },
+              } as unknown as Stream<LettaStreamingResponse>;
+            }
             if (++executions > 1 || queuedKind === "esc")
               return createAssistantMessageStream();
             return {
@@ -179,11 +214,17 @@ test.each([
         }
         return create(id, body, options);
       };
+      let releaseVisibleTool: (() => void) | undefined;
+      if (queuedKind === "human-visible" || queuedKind === "both-visible")
+        state.__passiveHold = () =>
+          new Promise((resolve) => {
+            releaseVisibleTool = resolve;
+          });
       const mods = join(process.env.LETTA_CONFIG_DIR, "mods");
       mkdirSync(mods, { recursive: true });
       writeFileSync(
         join(mods, "passive.ts"),
-        `export default function(letta){letta.events.on("turn_end",event=>{if(event.stopReason==="end_turn")globalThis.__passiveEnded=true;});letta.tools.register({name:"context_tool",description:"Record then queue",approvalPolicy:"auto",parameters:{type:"object",properties:{}},async run(){await globalThis.__passiveRecords.record({id:"during-tool",text:"Context during tool",visibility:"model"});globalThis.__passiveEnqueue();return "real tool output";}});letta.commands.register({id:"record",description:"Record context",async run(ctx){globalThis.__passiveRecords=ctx.conversation.context;await ctx.conversation.context.record({id:"remote",text:"Collaborator data",visibility:"model"});globalThis.__passiveRecorded=true;return {type:"output",output:"Recorded host-local context"};}});}`,
+        `export default function(letta){letta.events.on("turn_end",event=>{if(event.stopReason==="end_turn")globalThis.__passiveEnded=true;});letta.tools.register({name:"context_tool",description:"Record then queue",approvalPolicy:"auto",parameters:{type:"object",properties:{}},async run(){await globalThis.__passiveRecords.record({id:"during-tool",text:"Context during tool",visibility:"${queuedKind === "human-visible" || queuedKind === "stream-visible" ? "human" : queuedKind === "both-visible" ? "both" : "model"}"});await globalThis.__passiveHold?.();globalThis.__passiveEnqueue();return "real tool output";}});letta.commands.register({id:"record",description:"Record context",async run(ctx){globalThis.__passiveRecords=ctx.conversation.context;await ctx.conversation.context.record({id:"remote",text:"Collaborator data",visibility:"${queuedKind === "human-visible" || queuedKind === "stream-visible" ? "human" : queuedKind === "both-visible" ? "both" : "model"}"});globalThis.__passiveRecorded=true;return {type:"output",output:"Recorded host-local context"};}});}`,
       );
       const stdin = new Readable({ read() {} }) as NodeJS.ReadStream;
       stdin.isTTY = true;
@@ -198,6 +239,7 @@ test.each([
           agentState={agent}
           conversationId={conversation.id}
           systemInfoReminderEnabled={false}
+          tokenStreaming={queuedKind === "stream-visible"}
         />,
         {
           stdin,
@@ -222,9 +264,72 @@ test.each([
       if (!records) throw new Error("Missing public records handle");
       expect(await records.list()).toHaveLength(1);
       expect(await records.submissions()).toEqual([]);
+      if (queuedKind === "human-visible" || queuedKind === "both-visible") {
+        await waitFor(
+          () =>
+            stdout.frames.join("").includes("Collaborator data") &&
+            stdout.frames.join("").includes("host-local"),
+          "durable human row while idle",
+        );
+        expect(await records.submissions()).toEqual([]);
+      }
       await Bun.sleep(100);
       await send("Explicit human request");
       await waitFor(() => dispatched.length > 0, "native dispatch");
+      if (queuedKind === "stream-visible") {
+        await waitFor(
+          () => stdout.frames.join("").includes("Partial assistant"),
+          "assistant stream is active",
+        );
+        await records.record({
+          id: "stream-record",
+          text: "stream-time collaborator",
+          visibility: "both",
+        });
+        await waitFor(
+          () => stdout.frames.join("").includes("stream-time collaborator"),
+          "human context visible during assistant stream",
+        );
+        expect(dispatched).toHaveLength(1);
+        expect(await records.submissions()).toEqual([]);
+        const { getHostContextRecords } = await import(
+          "@/agent/host-context-records"
+        );
+        const projected = await getHostContextRecords().humanSnapshot({
+          agentId: agent.id,
+          conversationId: conversation.id,
+        });
+        const history = await backend.listConversationMessages(
+          conversation.id,
+          {
+            order: "asc",
+            limit: 100,
+          },
+        );
+        const assistant = history
+          .getPaginatedItems()
+          .find((row) => row.message_type === "assistant_message");
+        expect(assistant?.id).toBeDefined();
+        expect(
+          projected.find((entry) => entry.record.id === "stream-record")
+            ?.placement?.after,
+        ).toMatchObject({ messageId: assistant!.id });
+        releaseStreaming?.();
+        await waitFor(() => state.__passiveEnded === true, "stream finishes");
+        state.__passiveEnded = false;
+        await send("Next explicit human");
+        await waitFor(
+          () => dispatched.length === 2 && state.__passiveEnded === true,
+          "next human alone selects both record",
+        );
+        expect(JSON.stringify(dispatched[1])).toContain(
+          "stream-time collaborator",
+        );
+        expect(
+          (await records.submissions())[0]?.records.map((record) => record.id),
+        ).toEqual(["stream-record"]);
+        return;
+      }
       if (queuedKind === "esc") {
         addToMessageQueue({
           kind: "user",
@@ -264,6 +369,74 @@ test.each([
         expect(dispatched).toHaveLength(1);
         expect(executions).toBe(0);
         expect((await records.submissions())[0]?.outcome).toBe("uncertain");
+        return;
+      }
+      if (queuedKind === "human-visible" || queuedKind === "both-visible") {
+        expect(
+          JSON.stringify(dispatched[0]).includes("Collaborator data"),
+        ).toBe(queuedKind === "both-visible");
+        await waitFor(
+          () => stdout.frames.join("").includes("Context during tool"),
+          "human record visible during own tool turn",
+        );
+        expect(dispatched).toHaveLength(1);
+        releaseVisibleTool?.();
+        await waitFor(
+          () => dispatched.length >= 2,
+          "tool then queued human after visible record",
+        );
+        expect(
+          (await records.submissions()).some((s) =>
+            s.records.some((record) => record.id === "remote"),
+          ),
+        ).toBe(queuedKind === "both-visible");
+        await waitFor(
+          () => state.__passiveEnded === true,
+          "visible context turn completed",
+        );
+        const rawBefore = (
+          await backend.listConversationMessages(conversation.id, {
+            order: "asc",
+          })
+        ).getPaginatedItems();
+        const { getResumeDataFromBackend } = await import(
+          "@/agent/check-approval"
+        );
+        const resumed = await getResumeDataFromBackend(agent, conversation.id);
+        app.unmount();
+        app.cleanup();
+        const resumedOutput = new Output();
+        failureOutput = () => resumedOutput.frames.join("").slice(-20000);
+        app = render(
+          <App
+            agentId={agent.id}
+            agentState={agent}
+            conversationId={conversation.id}
+            messageHistory={resumed.messageHistory}
+            systemInfoReminderEnabled={false}
+          />,
+          {
+            stdin,
+            stdout: resumedOutput as Output & NodeJS.WriteStream,
+            debug: true,
+            patchConsole: false,
+            exitOnCtrlC: false,
+          },
+        );
+        await waitFor(
+          () =>
+            resumedOutput.frames.join("").includes("Collaborator data") &&
+            resumedOutput.frames.join("").includes("Context during tool"),
+          "restart reconstructs durable human rows",
+        );
+        expect(dispatched).toHaveLength(2);
+        expect(
+          (
+            await backend.listConversationMessages(conversation.id, {
+              order: "asc",
+            })
+          ).getPaginatedItems(),
+        ).toEqual(rawBefore);
         return;
       }
       const messages = dispatched[0]?.messages ?? [];
@@ -319,6 +492,7 @@ test.each([
       delete state.__passiveRecords;
       delete state.__passiveRecorded;
       delete state.__passiveEnded;
+      delete state.__passiveHold;
       delete state.__passiveEnqueue;
       rmSync(root, { recursive: true, force: true });
     }

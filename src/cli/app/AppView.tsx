@@ -1,7 +1,3 @@
-import { NativeQuestionPrompts } from "@/cli/mods/ModQuestionDialog";
-import type { PendingModQuestion } from "@/cli/mods/question-queue";
-// src/cli/app/AppView.tsx
-
 import { APIError } from "@letta-ai/letta-client/core/error";
 import type { AgentState } from "@letta-ai/letta-client/resources/agents/agents";
 import { Box } from "ink";
@@ -24,6 +20,7 @@ import { BashCommandMessage } from "@/cli/components/BashCommandMessage";
 import { BtwPane, type BtwState } from "@/cli/components/BtwPane";
 import { CommandMessage } from "@/cli/components/CommandMessage";
 import { CompactionSelector } from "@/cli/components/CompactionSelector";
+import { ContextMessage } from "@/cli/components/ContextMessage";
 import { ConversationSelector } from "@/cli/components/ConversationSelector";
 import { ErrorMessage } from "@/cli/components/ErrorMessageRich";
 import { EventMessage } from "@/cli/components/EventMessage";
@@ -85,6 +82,8 @@ import {
 } from "@/cli/helpers/tool-name-mapping";
 import { isTaskTool } from "@/cli/helpers/tool-name-mapping.js";
 import type { WindowTitleData } from "@/cli/helpers/window-title-config";
+import { NativeQuestionPrompts } from "@/cli/mods/ModQuestionDialog";
+import type { PendingModQuestion } from "@/cli/mods/question-queue";
 import type { ModContext } from "@/cli/mods/types";
 import type { LocalModAdapter } from "@/cli/mods/use-local-mod-adapter";
 import { experimentManager } from "@/experiments/manager";
@@ -104,6 +103,7 @@ import type {
   QueuedOverlayAction,
   StaticItem,
 } from "./types";
+import { useHumanContext } from "./use-human-context";
 
 type ModelSelectorOptions = {
   filterProvider?: string;
@@ -426,7 +426,6 @@ export function AppView(props: AppViewProps) {
     interruptRequested,
     hasStopFailedTasks,
     isAgentBusy,
-    liveItems,
     liveTrajectoryElapsedBaseMs,
     loadingState,
     markLocalModelsAvailable,
@@ -475,7 +474,6 @@ export function AppView(props: AppViewProps) {
     showCompactionsEnabled,
     showExitStats,
     openOverlay,
-    staticItems,
     staticRenderEpoch,
     modContext,
     statusLinePrompt,
@@ -493,10 +491,11 @@ export function AppView(props: AppViewProps) {
     updateAgentName,
   } = props;
 
+  const { staticItems, liveItems, epoch } = useHumanContext(props);
   return (
     <Box key={resumeKey} flexDirection="column">
       <StaticTranscript
-        renderEpoch={staticRenderEpoch}
+        renderEpoch={staticRenderEpoch + epoch}
         items={staticItems}
         columns={columns}
         statusLinePrompt={statusLinePrompt}
@@ -520,7 +519,6 @@ export function AppView(props: AppViewProps) {
           <>
             {/* Transcript - wrapped in AnimationProvider for overflow-based animation control */}
             <AnimationProvider shouldAnimate={shouldAnimate}>
-              {/* Show liveItems always - all approvals now render inline */}
               {liveItems.length > 0 && (
                 <Box flexDirection="column">
                   {liveItems.map((ln) => {
@@ -600,6 +598,8 @@ export function AppView(props: AppViewProps) {
                             }
                             showPreview={showApprovalPreview}
                           />
+                        ) : ln.kind === "context" ? (
+                          <ContextMessage line={ln} />
                         ) : ln.kind === "user" ? (
                           <UserMessage line={ln} prompt={statusLinePrompt} />
                         ) : ln.kind === "reasoning" ? (

@@ -300,6 +300,11 @@
       "path": "src/agent/passive-context-regressions.test.ts",
       "timeoutMs": 30000,
       "reason": "Replaces process-global backend/config for restart projection and pending-approval recovery during metadata outages."
+    },
+    {
+      "path": "src/cli/app/use-human-context.test.tsx",
+      "timeoutMs": 30000,
+      "reason": "Mounts the TUI context projection hook and replaces the process-global context owner/backend/config to test asynchronous activation fences and teardown."
     }
   ]
 }

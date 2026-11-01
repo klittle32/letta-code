@@ -9,7 +9,13 @@ import { capturePassiveContextSession } from "@/agent/passive-context-session";
 import { APIBackend, type Backend, getBackend } from "@/backend/backend";
 import { isCloudApiShutdownRejection } from "@/utils/cloud-api-shutdown";
 import { withFileLock } from "@/utils/file-lock";
+import type { ContextPlacement } from "./context-inbox";
 import { listContextInboxMetadata } from "./context-inbox-metadata";
+import {
+  contextNamespace,
+  createContextPresentation,
+  type HumanPresentationEntry,
+} from "./context-presentation";
 import type { ConversationMessageTransport } from "./message";
 import { setMessageTransportOwner } from "./message-transport-owner";
 
@@ -29,6 +35,7 @@ export function createPassiveContextHost(options: {
   getBackend: () => Backend;
   capture?: typeof capturePassiveContextSession;
 }) {
+  const presentation = createContextPresentation();
   const sessions = new WeakMap<
     Backend,
     Map<string, ReturnType<typeof capturePassiveContextSession>>
@@ -116,14 +123,77 @@ export function createPassiveContextHost(options: {
     return {
       async record(input: ContextInboxInput) {
         const frozen = structuredClone(input);
-        if (frozen.visibility !== "model")
-          throw new Error(
-            "Human transcript visibility is unsupported; use model visibility",
-          );
         const source = await captured();
         await source.assertCurrent({ signal });
         signal?.throwIfAborted();
-        return source.inbox.record(frozen);
+        let placement: ContextPlacement | undefined;
+        if (frozen.visibility !== "model") {
+          presentation.authorize(source.scope, backend);
+          placement = presentation.boundary(source.scope, backend);
+          if (!placement) {
+            const excluded = new Set(
+              (await source.inbox.listSubmissions()).map(
+                (s) => s.contextMessageOtid,
+              ),
+            );
+            const page = await source.transport.listConversationMessages(
+              scope.conversationId,
+              {
+                order: "desc",
+                limit: 100,
+                ...(scope.conversationId === "default"
+                  ? { agent_id: scope.agentId }
+                  : {}),
+              },
+              { signal },
+            );
+            const row = page
+              .getPaginatedItems()
+              .find(
+                (r) =>
+                  r.id &&
+                  [
+                    "user_message",
+                    "assistant_message",
+                    "reasoning_message",
+                    "tool_call_message",
+                    "approval_request_message",
+                  ].includes(r.message_type ?? "") &&
+                  !(
+                    r.message_type === "user_message" &&
+                    r.otid &&
+                    excluded.has(r.otid)
+                  ),
+              );
+            const tool =
+              row &&
+              (row.message_type === "tool_call_message" ||
+                row.message_type === "approval_request_message")
+                ? "tool_calls" in row && Array.isArray(row.tool_calls)
+                  ? row.tool_calls.at(-1)
+                  : row.tool_call
+                : undefined;
+            placement = row
+              ? {
+                  after: {
+                    messageId: row.id,
+                    ...(tool?.tool_call_id
+                      ? { toolCallId: tool.tool_call_id }
+                      : {}),
+                    ...("otid" in row && row.otid ? { otid: row.otid } : {}),
+                  },
+                }
+              : page.getPaginatedItems().length === 0
+                ? { after: null }
+                : undefined;
+          }
+          await source.assertCurrent({ signal });
+        }
+        signal?.throwIfAborted();
+        const record = await source.inbox.record(frozen, placement);
+        if (frozen.visibility !== "model")
+          presentation.invalidate(source.scope, backend);
+        return record;
       },
       async list() {
         return (await captured()).inbox.list();
@@ -177,6 +247,44 @@ export function createPassiveContextHost(options: {
   }
   return {
     context,
+    subscribeHuman(
+      scope: Scope,
+      boundary: () => ContextPlacement | undefined,
+      notify: () => void,
+    ) {
+      return presentation.subscribe(
+        scope,
+        options.getBackend(),
+        boundary,
+        notify,
+      );
+    },
+    async assertHumanCurrent(scope: Scope, id: string, signal?: AbortSignal) {
+      const backend = options.getBackend();
+      const source = await currentSession(scope, backend, signal);
+      if (!id.startsWith(`context:${contextNamespace(source.scope)}:`))
+        throw new Error("Context principal changed");
+      await source.assertCurrent({ signal });
+    },
+    async humanSnapshot(
+      scope: Scope,
+      signal?: AbortSignal,
+    ): Promise<HumanPresentationEntry[]> {
+      const backend = options.getBackend();
+      const metadata = await listContextInboxMetadata(options.directory, scope);
+      if (!metadata.some((entry) => entry.hasHuman)) return [];
+      const source = await currentSession(scope, backend, signal);
+      const entries = await source.inbox.humanEntries();
+      await source.assertCurrent({ signal });
+      if (options.getBackend() !== backend)
+        throw new Error("Context backend changed");
+      presentation.authorize(source.scope, backend);
+      const namespace = contextNamespace(source.scope);
+      return entries.map((entry) => ({
+        ...entry,
+        id: `context:${namespace}:${createHash("sha256").update(entry.record.id).digest("hex")}`,
+      }));
+    },
     /** Human transcript/reflection projection only; raw backend/mod history stays canonical. */
     async projectMessages(
       scope: { agentId?: string; conversationId: string },

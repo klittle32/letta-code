@@ -202,7 +202,10 @@ export type OverlayCommandConsumer = (
 export type { ApprovalDecision };
 
 // Items that have finished rendering and no longer change
+import type { ContextLine } from "@/cli/helpers/context-transcript";
+
 export type StaticItem =
+  | ContextLine
   | {
       kind: "welcome";
       id: string;
